@@ -5,7 +5,10 @@
 ## 1. Terminology
 
 * **Burrow** — A node capable of both sending and receiving Rabbit messages.
-* **Warren** — A connected network of burrows.
+- **Warren** — A connected network of burrows.  
+  A burrow can itself function as a warren by hosting and managing sub-burrows.  
+  This allows for hierarchical or nested warrens (sub-warrens), enabling scalable and
+  federated network topologies.
 * **Tunnel** — A secure, bidirectional connection between two burrows.
 * **Lane** — A logical asynchronous channel within a tunnel.
 * **Txn** — Transaction identifier for correlating request/response pairs.
@@ -38,6 +41,12 @@
 ### 2.3 Tunnels
 
 Each tunnel is secure, full-duplex, and may contain multiple asynchronous lanes.
+
+### 2.4 Nested Warrens
+A burrow may aggregate multiple tunnels and act as a routing or coordination hub,
+forming a warren.  
+Warrens may themselves be nested within larger warrens, permitting recursive
+discovery and federation.
 
 ---
 
