@@ -1,7 +1,7 @@
 # Rabbit Warren Prototype
 
 This repository contains a **prototype implementation** of the
-**Rabbit protocol** described in the conversation.  The goal of this
+**Rabbit protocol** general descrition.  The goal of this
 prototype is not to provide a fully‑featured, production‑ready
 peer‑to‑peer network, but rather to offer a comprehensive reference
 implementation and documentation of the ideas discussed.  In
