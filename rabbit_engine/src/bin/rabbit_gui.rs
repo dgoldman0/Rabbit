@@ -56,7 +56,7 @@ fn main() {
             "rabbit-gui: connecting to {} selector={} renderer={}",
             args.host, args.selector, _renderer
         );
-        launch_gui(gui_config, _initial_html);
+        launch_gui(gui_config, _initial_html, args.host.clone(), args.selector.clone());
     }
 
     #[cfg(not(feature = "gui"))]

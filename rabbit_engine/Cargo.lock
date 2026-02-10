@@ -3086,6 +3086,7 @@ dependencies = [
  "clap",
  "dioxus",
  "ed25519-dalek",
+ "futures-util",
  "rand 0.8.5",
  "rcgen",
  "rustls",

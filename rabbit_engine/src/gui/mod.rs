@@ -7,6 +7,7 @@
 
 #[cfg(feature = "gui")]
 pub mod app;
+pub mod bridge;
 pub mod dom;
 pub mod events;
 pub mod renderer;
