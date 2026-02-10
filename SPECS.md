@@ -36,7 +36,7 @@ federation.
    their own sequence numbers, acknowledgements, and credit-based flow control.
 
 4. **Everything is a selector.** Content, menus, search endpoints, event
-   streams, and UI bundles are all addressed by typed selectors in the same
+   streams, and UI declarations are all addressed by typed selectors in the same
    URI namespace.
 
 5. **Publish/subscribe is native.** Event streams (queues) are first-class
@@ -44,7 +44,7 @@ federation.
    replay from any point via the continuity engine.
 
 6. **Headed or headless.** A burrow can optionally serve a UI declaration
-   (HTML markup) for interactive use, or run headless as pure infrastructure.
+   (rendering guidelines) for interactive use, or run headless as pure infrastructure.
 
 7. **No central authority.** Discovery, routing, and trust propagation are
    peer-to-peer. Federation is voluntary and hierarchical, not mandatory.
@@ -265,11 +265,14 @@ UTF-8 text. Length is specified by the `Length` header.
 Type `9`. Fetched via `FETCH`, returned with `View: application/octet-stream`
 (or a more specific MIME type). Body bytes match `Length`.
 
-### 7.4 UI Bundles
+### 7.4 UI Declarations
 
-Type `u`. HTML markup fetched via `FETCH`, rendered by headed clients.
-The server may include `View: text/html`. UI bundles are optional — headless
-clients simply ignore them.
+Type `u`. Rendering guidelines fetched via `FETCH`. Not full HTML pages, but
+structured descriptions (view metadata, layout hints, interaction patterns)
+used by clients — particularly future LLM-based systems — to construct and
+interact with a DOM front end. The server may include `View: text/plain` or
+`View: application/json`. UI declarations are optional — headless clients
+simply ignore them.
 
 ---
 
@@ -474,7 +477,7 @@ anchors = ["ed25519:ANCHOR_KEY..."]
 - QUIC transport
 - Binary content serving (type 9)
 - Search endpoints (type 7)
-- UI bundles and HTTP server (type u)
+- UI declarations (type u)
 - Federation trust manifests and gossip
 - Session resumption
 - Multi-hop routing (forwarding through intermediate burrows)

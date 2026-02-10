@@ -370,7 +370,7 @@ The v1 release is done when:
 ## 6. What Stays Out of Scope (v2+)
 
 - QUIC transport (alternative to TCP/TLS)
-- UI bundles and embedded HTTP server (type `u`)
+- UI declarations (type `u` — rendering guidelines for LLM-based front ends)
 - mDNS / multicast discovery
 - Certificate chain verification beyond TOFU
 - Federation gossip protocol (protocol-level, beyond OFFER)
