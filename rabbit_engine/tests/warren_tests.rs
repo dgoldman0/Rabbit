@@ -225,15 +225,23 @@ async fn warren_discovery_menu() {
     table.register(beta).await;
 
     let items = warren_menu(&table).await;
-    assert_eq!(items.len(), 2);
+    // Header + blank + connected + disconnected + blank + footer = 6 items.
+    assert_eq!(items.len(), 6);
 
-    // Find the connected one (type '1') and the offline one (type 'i').
-    let connected: Vec<_> = items.iter().filter(|i| i.type_code == '1').collect();
-    let offline: Vec<_> = items.iter().filter(|i| i.type_code == 'i').collect();
+    // All items are info lines ('i') in the new format.
+    assert!(items.iter().all(|i| i.type_code == 'i'));
+
+    // Connected peer shows name + address.
+    let connected: Vec<_> = items.iter().filter(|i| i.label.contains("●")).collect();
     assert_eq!(connected.len(), 1);
+    assert!(connected[0].label.contains("alpha"));
+    assert!(connected[0].label.contains("10.0.0.1:7443"));
+
+    // Disconnected peer shows name + offline.
+    let offline: Vec<_> = items.iter().filter(|i| i.label.contains("○")).collect();
     assert_eq!(offline.len(), 1);
-    assert_eq!(connected[0].label, "alpha");
     assert!(offline[0].label.contains("beta"));
+    assert!(offline[0].label.contains("offline"));
 }
 
 // ── Pub/sub across burrow tunnels ────────────────────────────────

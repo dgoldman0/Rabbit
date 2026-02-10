@@ -6,11 +6,13 @@
 //! REQUEST`.
 
 use crate::content::handler as content_handler;
-use crate::content::store::ContentStore;
+use crate::content::store::{ContentEntry, ContentStore};
 use crate::events::engine::EventEngine;
 use crate::events::handler as event_handler;
 use crate::protocol::error::ProtocolError;
 use crate::protocol::frame::Frame;
+use crate::warren::discovery;
+use crate::warren::peers::PeerTable;
 
 /// Result of dispatching a frame.
 ///
@@ -50,12 +52,24 @@ pub struct Dispatcher<'a> {
     content: &'a ContentStore,
     /// Event engine for SUBSCRIBE and PUBLISH.
     events: &'a EventEngine,
+    /// Peer table for dynamic `/warren` discovery (optional).
+    peers: Option<&'a PeerTable>,
 }
 
 impl<'a> Dispatcher<'a> {
     /// Create a new dispatcher wired to the given subsystems.
     pub fn new(content: &'a ContentStore, events: &'a EventEngine) -> Self {
-        Self { content, events }
+        Self {
+            content,
+            events,
+            peers: None,
+        }
+    }
+
+    /// Attach a peer table for dynamic `/warren` discovery.
+    pub fn with_peers(mut self, peers: &'a PeerTable) -> Self {
+        self.peers = Some(peers);
+        self
     }
 
     /// Dispatch a single incoming frame and return the response(s).
@@ -65,14 +79,21 @@ impl<'a> Dispatcher<'a> {
     pub async fn dispatch(&self, frame: &Frame, peer_id: &str) -> DispatchResult {
         match frame.verb.as_str() {
             // ── Content ────────────────────────────────────────
-            "LIST" => {
+            "LIST" | "FETCH" => {
                 let selector = frame.args.first().map(|s| s.as_str()).unwrap_or("/");
-                let response = content_handler::handle_list(self.content, selector, frame);
-                DispatchResult::single(response)
-            }
-            "FETCH" => {
-                let selector = frame.args.first().map(|s| s.as_str()).unwrap_or("/");
-                let response = content_handler::handle_fetch(self.content, selector, frame);
+                // Dynamic warren discovery — serve /warren from the
+                // peer table instead of the static content store.
+                if selector == "/warren" {
+                    if let Some(peers) = self.peers {
+                        let response = self.warren_response(peers, frame).await;
+                        return DispatchResult::single(response);
+                    }
+                }
+                let response = if frame.verb == "LIST" {
+                    content_handler::handle_list(self.content, selector, frame)
+                } else {
+                    content_handler::handle_fetch(self.content, selector, frame)
+                };
                 DispatchResult::single(response)
             }
 
@@ -137,6 +158,25 @@ impl<'a> Dispatcher<'a> {
                 DispatchResult::single(err.into())
             }
         }
+    }
+
+    /// Build a dynamic `200 MENU` response for `/warren` from the
+    /// peer table.
+    async fn warren_response(&self, peers: &PeerTable, request: &Frame) -> Frame {
+        let lane = request.header("Lane").unwrap_or("0");
+        let txn = request.header("Txn").unwrap_or("");
+
+        let items = discovery::warren_menu(peers).await;
+        let entry = ContentEntry::Menu(items);
+
+        let mut response = Frame::new("200 MENU");
+        response.set_header("Lane", lane);
+        if !txn.is_empty() {
+            response.set_header("Txn", txn);
+        }
+        response.set_header("View", entry.view_type());
+        response.set_body(entry.to_body());
+        response
     }
 }
 

@@ -161,10 +161,10 @@ impl Burrow {
         self.trust.save(&trust_path)
     }
 
-    /// Create a [`Dispatcher`] that borrows this burrow's content and
-    /// event engine.
+    /// Create a [`Dispatcher`] that borrows this burrow's content,
+    /// event engine, and peer table.
     pub fn dispatcher(&self) -> Dispatcher<'_> {
-        Dispatcher::new(&self.content, &self.events)
+        Dispatcher::new(&self.content, &self.events).with_peers(&self.peers)
     }
 
     /// Run the server-side protocol loop on an incoming tunnel.

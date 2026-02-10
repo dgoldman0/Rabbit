@@ -138,6 +138,21 @@ async fn run_warren(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             "connecting to root"
         );
 
+        // Register the child in the root's peer table so /warren
+        // discovery works.
+        let child_addr = format!("127.0.0.1:{}", rb.port);
+        let mut child_peer = rabbit_engine::warren::peers::PeerInfo::new(
+            rb.burrow.burrow_id(),
+            &child_addr,
+            &rb.burrow.name,
+        );
+        child_peer.connected = true;
+        child_peer.last_seen = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        running[0].burrow.peers.register(child_peer).await;
+
         let burrow_for_task = Arc::clone(&burrow);
         tokio::spawn(async move {
             match connect_and_dispatch(&burrow_for_task, &addr, cc).await {
@@ -260,6 +275,7 @@ port = {port}
 selector = "/"
 items = [
     {{ type = "i", label = "Welcome to {name}" }},
+    {{ type = "1", label = "Warren Directory", selector = "/warren" }},
     {{ type = "0", label = "About", selector = "/0/about" }},
 ]
 
