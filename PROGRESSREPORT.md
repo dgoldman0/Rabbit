@@ -173,7 +173,7 @@ H8 (537d816), tests (7bcb83f).
 | `tokio-rustls` | 0.26 | Async TLS | MVP Phase 3 |
 | `rustls-pemfile` | 2 | PEM loading | MVP Phase 3 |
 | `rcgen` | 0.13 | Cert generation | MVP Phase 3 |
-| `serde` | 1 | TOML config (+ JSON for AI) | MVP Phase 5 |
+| `serde` | 1 | TOML config, type `u` JSON | MVP Phase 5 |
 | `toml` | 0.8 | Config parsing | MVP Phase 5 |
 | `clap` | 4 | CLI parsing | MVP Phase 6 |
 | `tracing` | 0.1 | Structured logging | MVP Phase 6 |
@@ -186,7 +186,7 @@ H8 (537d816), tests (7bcb83f).
 
 | Phase | What | Status |
 |-------|------|--------|
-| I | AI/LLM Integration (chat, model config, command execution) | Planned |
+| I | AI/LLM Integration (type `u`, rabbit-ai peer, chat, commands) | Planned |
 | J | GUI/HTML Rendering Engine (Dioxus+Blitz, AI-driven views) | Planned |
 
 See PLAN.md for full details.

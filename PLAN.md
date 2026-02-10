@@ -303,43 +303,61 @@ panics on malformed input. Performance is measured and documented.
 
 ### Phase I: AI / LLM Integration
 
-**Goal:** Make burrows AI-native. A burrow can host LLM-powered chat
-topics where connected clients converse with a model. The AI operates
-through the existing pub/sub system — it subscribes to a chat topic,
-receives human messages as EVENTs, calls an LLM API, and publishes
-the response back. Model parameters, system messages, and command
-permissions are all configurable via TOML.
+**Goal:** Make burrows AI-native. The AI is a **Rabbit protocol peer** —
+a separate `rabbit-ai` binary that connects to burrows through the
+existing tunnel/handshake/pub-sub infrastructure. It subscribes to chat
+topics, receives human messages as EVENTs, calls an LLM externally, and
+publishes responses back through PUBLISH. **No HTTP client in the engine
+library** — the AI speaks Rabbit protocol to the burrow and HTTPS to
+OpenAI from its own binary.
+
+This phase also implements **type `u` UI declarations** from §7.4 of the
+spec — structured content served via FETCH that enables rich client
+rendering (the foundation Phase J builds on).
 
 **Architecture:**
 
 ```
-┌──────────────────────────────────────────────┐
-│                   Burrow                      │
-│  ┌──────────┐   ┌────────────┐   ┌────────┐ │
-│  │ EventEngine│←→│ AiConnector│──→│ OpenAI │ │
-│  │ /q/chat   │   │  (per topic)│   │  API   │ │
-│  └──────────┘   └────────────┘   └────────┘ │
-│       ↑               │                      │
-│    PUBLISH         response                  │
-│    (human)      (AI → PUBLISH)               │
-│       ↑               ↓                      │
-│  ┌──────────────────────────────────────────┐│
-│  │          handle_tunnel (fan-out)          ││
-│  └──────────────────────────────────────────┘│
-└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    rabbit-ai binary                           │
+│  ┌──────────────┐   ┌─────────────────┐   ┌───────────────┐ │
+│  │ Rabbit Client │←→│ ConversationMgr │──→│ OpenAI API    │ │
+│  │ (tunnel to   │   │ (history, roles, │   │ (raw HTTPS in │ │
+│  │  burrow)     │   │  token budget)  │   │  binary only) │ │
+│  └──────────────┘   └─────────────────┘   └───────────────┘ │
+│    SUBSCRIBE/PUBLISH       ↑                                  │
+│    FETCH/SEARCH           commands                            │
+└──────────────────────────────────────────────────────────────┘
+         ↕ Rabbit protocol (TLS tunnel)
+┌──────────────────────────────────────────────────────────────┐
+│                        Burrow                                 │
+│  EventEngine ←→ handle_tunnel ←→ ContentStore (type u)       │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-The `AiConnector` is a background task per AI-enabled topic. It:
-1. Subscribes internally to the topic (via `EventEngine`).
-2. When a human publishes a message, it builds a chat-completion
-   request from the conversation history + system message.
-3. Calls the OpenAI-compatible API (HTTPS, JSON).
-4. Publishes the model's response back to the topic.
-5. Optionally executes approved commands if the model emits them.
+The `rabbit-ai` binary is a standard Rabbit client that:
+1. Connects to the burrow via a TLS tunnel (same as `rabbit browse`).
+2. Authenticates, receives capabilities (Subscribe, Publish, Fetch, Search).
+3. Subscribes to configured chat topics.
+4. When a human publishes a message (EVENT), it:
+   a. Adds it to the conversation history.
+   b. Calls the OpenAI API (raw HTTPS POST via tokio-rustls — **in the
+      binary only**, not the engine library).
+   c. Publishes the AI response back to the topic via PUBLISH.
+5. Can execute gated commands through the protocol (SEARCH, FETCH, DESCRIBE).
+6. Can publish type `u` UI declarations for rich client rendering.
 
 **Configuration:**
 
 ```toml
+[[content.ui]]
+selector = "/u/chat-view"
+body = '{"layout": "chat", "theme": "dark"}'
+
+[[content.ui]]
+selector = "/u/main-view"
+file = "views/main.json"
+
 [[ai.chats]]
 topic = "/q/chat"
 provider = "openai"                    # openai-compatible API
@@ -368,30 +386,29 @@ timeout_secs = 10          # per-command timeout
 
 | # | Task | Files |
 |---|------|-------|
-| I1 | **AiConfig structs.** `AiConfig`, `AiChatConfig`, `AiParamsConfig`, `AiCommandConfig` in config.rs. Parse `[[ai.chats]]` TOML sections. Validate model, provider, params. API key from `OPENAI_API_KEY` env var (never in config file). | `config.rs` |
-| I2 | **HTTP client module.** Minimal async HTTPS client using `tokio` + `rustls` for calling OpenAI-compatible APIs. No heavy HTTP crate — raw HTTP/1.1 over TLS is sufficient for a single POST endpoint. Build JSON request body with `serde_json`, parse JSON response. Handles streaming (SSE) for token-by-token delivery. | `ai/http_client.rs` (new) |
-| I3 | **Chat completion API.** `ChatCompletionRequest` / `ChatCompletionResponse` types. `complete(config, messages) -> Result<String>`. Message history management: rolling window with token budget awareness (trim oldest messages when approaching `max_tokens`). Retry with backoff on 429/5xx. | `ai/completion.rs` (new) |
-| I4 | **AiConnector runtime.** Background `tokio::spawn` task per AI chat topic. Subscribes to the topic's events, maintains conversation history, calls completion API on each human message, publishes AI response back. Includes `AiRole` enum (`User`, `Assistant`, `System`) for message attribution. Respects rate limiting (don't let AI trigger its own rate limiter). | `ai/connector.rs` (new) |
-| I5 | **Command execution framework.** `AiCommand` trait with `name()`, `description()`, `execute(args) -> Result<String>`. Built-in commands: `search` (calls SEARCH verb internally), `fetch` (calls FETCH internally), `describe` (calls DESCRIBE internally). Commands gated by allowlist. Output sandboxed (max 4KB response, timeout enforced). Command results injected into conversation as system messages. | `ai/commands.rs` (new) |
-| I6 | **Burrow AI wiring.** On startup, if `ai.chats` is configured, spawn `AiConnector` tasks. Wire them to the `EventEngine`. Graceful shutdown on burrow stop. Config reload without restart (future). | `burrow.rs`, `ai/mod.rs` (new) |
-| I7 | **AI chat integration tests.** Test the full flow: human publishes → AI connector receives → calls API → publishes response. Mock the HTTP endpoint for deterministic testing. Test command execution gating. Test conversation history truncation. | `tests/phase_i_tests.rs` |
+| I1 | **Type `u` UI declarations.** Add type `u` to content store and config. `UiConfig` entries in `[[content.ui]]` with selector, optional inline JSON body, or file path. Served via FETCH with `View: application/json`. Add `serde_json` to Cargo.toml. Implements spec §7.4. | `config.rs`, `content/store.rs`, `content/handler.rs`, `content/loader.rs`, `Cargo.toml` |
+| I2 | **AiConfig structs.** `AiConfig`, `AiChatConfig`, `AiParamsConfig`, `AiCommandConfig` in config.rs. Parse `[[ai.chats]]` TOML sections. API key from `OPENAI_API_KEY` env var (never in config file). Validate provider, model, params. | `config.rs` |
+| I3 | **AI conversation types.** `AiRole` enum (`User`, `Assistant`, `System`), `AiMessage` struct, `ConversationHistory` with rolling window and token budget awareness. Library types imported by the `rabbit-ai` binary. | `ai/types.rs` (new), `ai/mod.rs` (new) |
+| I4 | **Command execution framework.** `AiCommand` trait with `name()`, `execute(args) → Result<String>`. Protocol commands: `search` (SEARCH verb), `fetch` (FETCH verb), `describe` (DESCRIBE verb). Gated by allowlist, disabled by default. Output capped at 4KB, timeout enforced. Commands execute through the Rabbit tunnel — the AI uses protocol verbs, not internal APIs. | `ai/commands.rs` (new) |
+| I5 | **`rabbit-ai` binary.** Rabbit protocol client that connects to a burrow, subscribes to AI chat topics, calls OpenAI (raw HTTPS POST via `tokio-rustls` — in the binary, NOT the engine lib), publishes responses via PUBLISH. Reads `[[ai.chats]]` config. Graceful shutdown on signal. | `bin/rabbit_ai.rs` (new) |
+| I6 | **Integration tests.** Config parsing for `[[ai.chats]]` + `[[content.ui]]`. Type `u` content store and FETCH. Conversation history truncation. Command gating (allowed vs blocked). Mock end-to-end: human EVENT → AI PUBLISH. | `tests/phase_i_tests.rs` |
 
 **Tests:**
 - Config: parse `[[ai.chats]]` with all fields, verify defaults.
+- Config: parse `[[content.ui]]` with JSON body and file-backed.
 - Config: missing API key env var → clear error message.
-- HTTP client: POST to mock HTTPS endpoint → parse JSON response.
-- Completion: build request with system message + history, parse response.
-- Connector: human publishes "hello" → AI response published to topic.
-- Connector: conversation history maintained across messages.
-- Commands: `search` command allowed → executes. `fetch` not in allowlist → blocked.
-- Commands: command output truncated at 4KB.
+- Type `u`: store UI declaration, FETCH returns `View: application/json`.
+- Conversation: add messages, truncate at token budget, system message preserved.
+- Commands: `search` in allowlist → type-checks. `fetch` not in allowlist → blocked.
 - Commands: disabled by default → no commands execute.
-- Rate limiting: AI responses don't count against the human's rate limit.
-- Graceful shutdown: connector stops cleanly when burrow shuts down.
+- Commands: output > 4KB → truncated.
+- End-to-end (mock): human publishes "hello" → AI response appears on topic.
+- Graceful shutdown: `rabbit-ai` process exits cleanly on signal.
 
-**Exit criteria:** A burrow can be configured with `[[ai.chats]]` and
-an LLM-powered assistant participates in the chat topic automatically.
-Commands are heavily gated by default (disabled unless explicitly allowed).
+**Exit criteria:** `rabbit-ai` connects to a burrow, subscribes to a chat
+topic, and LLM responses appear alongside human messages via PUBLISH.
+Type `u` content is served via FETCH. Commands are disabled by default.
+**No HTTP code in the engine library — all OpenAI calls live in the binary.**
 
 ---
 
@@ -421,11 +438,13 @@ Chrome — pure Rust rendering.
 └────────────────────────────────────────────────────────┘
 ```
 
-1. **AI Architect:** An LLM (GPT-5 mini, via the same OpenAI connector
-   from Phase I) that receives burrow content (menus, text, events) and
-   generates pure structural HTML + inline CSS. **No JavaScript.** It
-   acts as a "view generator" — translating protocol data into visual
-   layout.
+1. **AI Architect:** An LLM (GPT-5 mini, via the `rabbit-ai` peer
+   from Phase I or a local view-generation call in the GUI binary) that
+   receives burrow content (menus, text, events) delivered through the
+   Rabbit protocol and generates pure structural HTML + inline CSS.
+   **No JavaScript.** It acts as a "view generator" — translating
+   protocol data into visual layout. Content arrives via FETCH/SUBSCRIBE;
+   views are published back as type `u` UI declarations.
 
 2. **Rust Engine:** Parses the AI-generated HTML into a Virtual DOM.
    Manages application state, navigation, event listeners. Handles all
@@ -519,11 +538,12 @@ The engine runs on `tokio`, `rustls`, `ed25519-dalek`, and the std lib.
 
 | Crate | Purpose | Notes |
 |-------|---------|-------|
-| `serde_json` | JSON serialization for OpenAI API | Already transitive via serde |
-| — | No HTTP crate | Raw HTTP/1.1 over `tokio-rustls` |
+| `serde_json` | JSON for type `u` UI declarations (§7.4) | Already transitive via serde |
 
 API key is read from `OPENAI_API_KEY` environment variable — never stored
-in config files or binary.
+in config files or binary. The `rabbit-ai` binary calls OpenAI via raw
+HTTPS over `tokio-rustls` (already a dependency) — **no HTTP code in the
+engine library.**
 
 ### Phase J: GUI Rendering
 
@@ -544,13 +564,14 @@ well-maintained Rust-native crates with no C/C++ build dependencies
 
 Phases A–H are complete. Remaining priority:
 
-1. **Phase I** (AI integration) — enables LLM-powered chat, which is
-   the prerequisite for Phase J's AI-driven rendering.
+1. **Phase I** (AI integration) — type `u` UI declarations, AI
+   conversation types, and the `rabbit-ai` binary. Prerequisite for
+   Phase J's AI-driven rendering.
 2. **Phase J** (GUI rendering) — transforms `rabbit` from terminal to
-   native GUI. Depends on Phase I for the view generation AI.
+   native GUI. Uses type `u` content and AI view generation from Phase I.
 
-Phase I is independently useful (chat bots in terminal mode). Phase J
-requires Phase I.
+Phase I is independently useful (`rabbit-ai` chat bots work in terminal
+mode). Phase J requires Phase I for type `u` support and AI view generation.
 
 ---
 
@@ -585,8 +606,8 @@ remaining item (low priority — code + SPECS.md cover everything).
 
 ## 5.1 Success Criteria for v1.1 (AI + GUI)
 
-- [ ] A burrow can host AI-powered chat via `[[ai.chats]]` config.
-- [ ] LLM responses appear in pub/sub topics alongside human messages.
+- [ ] `rabbit-ai` connects to a burrow and powers chat via `[[ai.chats]]` config.
+- [ ] LLM responses appear in pub/sub topics via PUBLISH (protocol-native).
 - [ ] AI command execution is disabled by default; allowlist-only.
 - [ ] `rabbit --gui` opens a native GPU-rendered window.
 - [ ] Menus, text, and events render as AI-generated HTML.
