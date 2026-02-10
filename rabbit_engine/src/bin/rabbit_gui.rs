@@ -10,6 +10,7 @@
 use clap::Parser;
 
 use rabbit_engine::config::Config;
+use rabbit_engine::gui::renderer::Renderer;
 use rabbit_engine::gui::theme::Theme;
 use rabbit_engine::gui::view_gen::{fallback_html, ViewContent};
 
@@ -39,6 +40,7 @@ fn main() {
     let config = Config::load(&args.config).unwrap_or_default();
     let gui_config = config.gui.clone();
     let _theme = Theme::parse(&gui_config.theme);
+    let _renderer = Renderer::parse(&gui_config.renderer).resolve();
 
     // Generate initial HTML (fallback until we connect and fetch).
     let _initial_html = fallback_html(
@@ -51,8 +53,8 @@ fn main() {
     #[cfg(feature = "gui")]
     {
         eprintln!(
-            "rabbit-gui: connecting to {} selector={}",
-            args.host, args.selector
+            "rabbit-gui: connecting to {} selector={} renderer={}",
+            args.host, args.selector, _renderer
         );
         launch_gui(gui_config, _initial_html);
     }

@@ -8,6 +8,7 @@ license = "MIT"
 [features]
 default = []
 gui = ["dep:dioxus"]
+gui-native = ["gui"]
 
 [dependencies]
 dioxus = { version = "0.7", features = ["desktop"], optional = true }

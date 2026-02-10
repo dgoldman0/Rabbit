@@ -9,6 +9,7 @@
 pub mod app;
 pub mod dom;
 pub mod events;
+pub mod renderer;
 pub mod state;
 pub mod theme;
 pub mod view_gen;

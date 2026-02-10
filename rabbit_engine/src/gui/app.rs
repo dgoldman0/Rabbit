@@ -10,6 +10,7 @@ use dioxus::prelude::*;
 
 use crate::config::GuiConfig;
 use crate::gui::events::{resolve_key, Action, ActionMap};
+use crate::gui::renderer::Renderer;
 use crate::gui::state::ConnectionStatus;
 use crate::gui::theme::{self, Theme};
 use crate::gui::view_gen::{fallback_html, ViewContent};
@@ -20,6 +21,7 @@ use crate::gui::view_gen::{fallback_html, ViewContent};
 /// takes a plain `fn()` pointer, not a closure).
 struct LaunchData {
     initial_html: String,
+    renderer: Renderer,
 }
 
 static LAUNCH_DATA: OnceLock<LaunchData> = OnceLock::new();
@@ -74,9 +76,15 @@ pub fn launch_gui(config: GuiConfig, initial_html: String) {
     let wc = WindowConfig::from(&config);
     let css = theme::generate_css(wc.theme, wc.font_size);
 
+    // Resolve the renderer backend (falls back to WebView if Blitz
+    // is not compiled in).
+    let renderer = Renderer::parse(&config.renderer).resolve();
+    eprintln!("rabbit-gui: using renderer {}", renderer);
+
     // Store data for the App fn (launch takes a plain fn pointer).
     let _ = LAUNCH_DATA.set(LaunchData {
         initial_html,
+        renderer,
     });
 
     LaunchBuilder::desktop()
@@ -103,7 +111,8 @@ fn App() -> Element {
 
     // Reactive signals.
     let html_content = use_signal(|| data.initial_html.clone());
-    let mut status_text = use_signal(|| String::from("Ready"));
+    let renderer = data.renderer;
+    let mut status_text = use_signal(move || format!("Ready — {}", renderer));
     let title = use_signal(|| String::from("Rabbit"));
     let can_back = use_signal(|| false);
     let can_forward = use_signal(|| false);
