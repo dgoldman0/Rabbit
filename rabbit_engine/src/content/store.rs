@@ -96,6 +96,8 @@ pub enum ContentEntry {
     Menu(Vec<MenuItem>),
     /// Plain text content.
     Text(String),
+    /// Binary content (raw bytes + MIME type).
+    Binary(Vec<u8>, String),
 }
 
 impl ContentEntry {
@@ -114,14 +116,41 @@ impl ContentEntry {
                 body
             }
             ContentEntry::Text(text) => text.clone(),
+            ContentEntry::Binary(_, _) => "[binary content]".to_string(),
+        }
+    }
+
+    /// Return the raw binary bytes (only for Binary entries).
+    pub fn binary_bytes(&self) -> Option<&[u8]> {
+        match self {
+            ContentEntry::Binary(data, _) => Some(data),
+            _ => None,
+        }
+    }
+
+    /// Return the MIME type for the entry.
+    pub fn mime_type(&self) -> &str {
+        match self {
+            ContentEntry::Menu(_) => "text/rabbitmap",
+            ContentEntry::Text(_) => "text/plain",
+            ContentEntry::Binary(_, mime) => mime,
+        }
+    }
+
+    /// Return the body length in bytes.
+    pub fn body_length(&self) -> usize {
+        match self {
+            ContentEntry::Menu(_) | ContentEntry::Text(_) => self.to_body().len(),
+            ContentEntry::Binary(data, _) => data.len(),
         }
     }
 
     /// Return the appropriate `View` header value.
-    pub fn view_type(&self) -> &'static str {
+    pub fn view_type(&self) -> &str {
         match self {
             ContentEntry::Menu(_) => "text/rabbitmap",
             ContentEntry::Text(_) => "text/plain",
+            ContentEntry::Binary(_, mime) => mime,
         }
     }
 }
@@ -150,6 +179,17 @@ impl ContentStore {
     pub fn register_text(&mut self, selector: impl Into<String>, text: impl Into<String>) {
         self.entries
             .insert(selector.into(), ContentEntry::Text(text.into()));
+    }
+
+    /// Register a binary content entry at the given selector.
+    pub fn register_binary(
+        &mut self,
+        selector: impl Into<String>,
+        data: Vec<u8>,
+        mime: impl Into<String>,
+    ) {
+        self.entries
+            .insert(selector.into(), ContentEntry::Binary(data, mime.into()));
     }
 
     /// Look up a selector and return the entry (if it exists).

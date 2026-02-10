@@ -281,9 +281,8 @@ body = "Built from TOML config, served over TLS."
 /// Pub/sub works over TLS tunnels.
 #[tokio::test]
 async fn pubsub_over_tls() {
-    let mut server = Burrow::in_memory("pubsub-tls");
-    server.require_auth = false;
-    let server = Arc::new(server);
+    // Use authenticated mode — authenticated peers get full caps.
+    let server = Arc::new(Burrow::in_memory("pubsub-tls"));
 
     let cert_pair = generate_self_signed().unwrap();
     let server_config = make_server_config(&cert_pair).unwrap();

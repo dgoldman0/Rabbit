@@ -26,6 +26,25 @@ pub struct Event {
     pub body: String,
 }
 
+/// Quality-of-service level for event delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QoS {
+    /// Best-effort: drop events if the subscriber is slow.
+    Stream,
+    /// Guaranteed: queue events if the subscriber is slow (default).
+    Event,
+}
+
+impl QoS {
+    /// Parse a QoS level from a header value.
+    pub fn from_header(value: &str) -> Self {
+        match value.to_lowercase().as_str() {
+            "stream" => QoS::Stream,
+            _ => QoS::Event,
+        }
+    }
+}
+
 /// Tracks a single subscriber's position in a topic.
 #[derive(Debug, Clone)]
 pub struct SubscriberState {
@@ -35,6 +54,8 @@ pub struct SubscriberState {
     pub lane: String,
     /// Last sequence number delivered to this subscriber.
     pub last_delivered_seq: u64,
+    /// Quality-of-service level for this subscription.
+    pub qos: QoS,
 }
 
 /// State for a single topic.
@@ -104,7 +125,19 @@ impl EventEngine {
         lane: &str,
         since_seq: Option<u64>,
     ) -> Vec<Frame> {
-        let mut topics = self.inner.lock().unwrap();
+        self.subscribe_with_qos(topic, peer_id, lane, since_seq, QoS::Event)
+    }
+
+    /// Subscribe a peer to a topic with a specific QoS level.
+    pub fn subscribe_with_qos(
+        &self,
+        topic: &str,
+        peer_id: &str,
+        lane: &str,
+        since_seq: Option<u64>,
+        qos: QoS,
+    ) -> Vec<Frame> {
+        let mut topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let state = topics
             .entry(topic.to_string())
             .or_insert_with(TopicState::new);
@@ -115,6 +148,7 @@ impl EventEngine {
                 peer_id: peer_id.to_string(),
                 lane: lane.to_string(),
                 last_delivered_seq: since_seq.unwrap_or(0),
+                qos,
             },
         );
 
@@ -132,7 +166,7 @@ impl EventEngine {
     ///
     /// Returns `true` if the peer was subscribed, `false` otherwise.
     pub fn unsubscribe(&self, topic: &str, peer_id: &str) -> bool {
-        let mut topics = self.inner.lock().unwrap();
+        let mut topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(state) = topics.get_mut(topic) {
             state.subscribers.remove(peer_id).is_some()
         } else {
@@ -142,11 +176,14 @@ impl EventEngine {
 
     /// Publish an event to a topic.
     ///
-    /// Appends the event to the topic log and returns EVENT frames
-    /// for each active subscriber.  If the topic doesn't exist, it
-    /// is created.
-    pub fn publish(&self, topic: &str, body: &str) -> Vec<Frame> {
-        let mut topics = self.inner.lock().unwrap();
+    /// Appends the event to the topic log and returns `(peer_id, Frame)`
+    /// pairs for each active subscriber, plus the persisted [`Event`].
+    /// The caller uses the peer IDs to route frames to the correct
+    /// tunnels via the session manager.
+    ///
+    /// Returns `(targeted_broadcast_frames, event)`.
+    pub fn publish(&self, topic: &str, body: &str) -> (Vec<(String, Frame)>, Event) {
+        let mut topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let state = topics
             .entry(topic.to_string())
             .or_insert_with(TopicState::new);
@@ -157,18 +194,22 @@ impl EventEngine {
         };
         state.next_seq += 1;
 
-        // Build broadcast frames for each subscriber
-        let frames: Vec<Frame> = state
+        // Build targeted broadcast frames: (peer_id, frame) for each subscriber
+        let frames: Vec<(String, Frame)> = state
             .subscribers
             .values_mut()
             .map(|sub| {
                 sub.last_delivered_seq = event.seq;
-                TopicState::event_frame(topic, &event, &sub.lane)
+                (
+                    sub.peer_id.clone(),
+                    TopicState::event_frame(topic, &event, &sub.lane),
+                )
             })
             .collect();
 
+        let event_clone = event.clone();
         state.events.push(event);
-        frames
+        (frames, event_clone)
     }
 
     /// Replay events from a topic starting after `since_seq`.
@@ -176,7 +217,7 @@ impl EventEngine {
     /// Returns EVENT frames for events with seq > since_seq.
     /// Uses the given `lane` in frame headers.
     pub fn replay(&self, topic: &str, since_seq: u64, lane: &str) -> Vec<Frame> {
-        let topics = self.inner.lock().unwrap();
+        let topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match topics.get(topic) {
             Some(state) => state
                 .events
@@ -190,25 +231,25 @@ impl EventEngine {
 
     /// Return the number of events logged for a topic.
     pub fn event_count(&self, topic: &str) -> usize {
-        let topics = self.inner.lock().unwrap();
+        let topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         topics.get(topic).map(|t| t.events.len()).unwrap_or(0)
     }
 
     /// Return the number of subscribers for a topic.
     pub fn subscriber_count(&self, topic: &str) -> usize {
-        let topics = self.inner.lock().unwrap();
+        let topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         topics.get(topic).map(|t| t.subscribers.len()).unwrap_or(0)
     }
 
     /// Check whether a topic exists.
     pub fn has_topic(&self, topic: &str) -> bool {
-        let topics = self.inner.lock().unwrap();
+        let topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         topics.contains_key(topic)
     }
 
     /// Return all topic paths (sorted).
     pub fn topics(&self) -> Vec<String> {
-        let topics = self.inner.lock().unwrap();
+        let topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut keys: Vec<String> = topics.keys().cloned().collect();
         keys.sort();
         keys
@@ -216,7 +257,7 @@ impl EventEngine {
 
     /// Return the raw events for a topic (for continuity persistence).
     pub fn events(&self, topic: &str) -> Vec<Event> {
-        let topics = self.inner.lock().unwrap();
+        let topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         topics
             .get(topic)
             .map(|t| t.events.clone())
@@ -228,7 +269,7 @@ impl EventEngine {
     /// Sets the topic's event log and next_seq.  Any existing events
     /// are replaced.
     pub fn load_events(&self, topic: &str, events: Vec<Event>) {
-        let mut topics = self.inner.lock().unwrap();
+        let mut topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let state = topics
             .entry(topic.to_string())
             .or_insert_with(TopicState::new);
@@ -239,7 +280,7 @@ impl EventEngine {
 
     /// Prune events for a topic, keeping only the last `keep` events.
     pub fn prune(&self, topic: &str, keep: usize) {
-        let mut topics = self.inner.lock().unwrap();
+        let mut topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(state) = topics.get_mut(topic) {
             if state.events.len() > keep {
                 let drain_count = state.events.len() - keep;
@@ -272,12 +313,15 @@ mod tests {
     fn publish_creates_event() {
         let engine = EventEngine::new();
         engine.subscribe("/q/chat", "alice", "5", None);
-        let frames = engine.publish("/q/chat", "Hello!");
+        let (frames, event) = engine.publish("/q/chat", "Hello!");
         assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].verb, "EVENT");
-        assert_eq!(frames[0].args, vec!["/q/chat"]);
-        assert_eq!(frames[0].header("Seq"), Some("1"));
-        assert_eq!(frames[0].body.as_deref(), Some("Hello!"));
+        assert_eq!(frames[0].0, "alice");
+        assert_eq!(frames[0].1.verb, "EVENT");
+        assert_eq!(frames[0].1.args, vec!["/q/chat"]);
+        assert_eq!(frames[0].1.header("Seq"), Some("1"));
+        assert_eq!(frames[0].1.body.as_deref(), Some("Hello!"));
+        assert_eq!(event.seq, 1);
+        assert_eq!(event.body, "Hello!");
         assert_eq!(engine.event_count("/q/chat"), 1);
     }
 
@@ -286,12 +330,19 @@ mod tests {
         let engine = EventEngine::new();
         engine.subscribe("/q/chat", "alice", "5", None);
         engine.subscribe("/q/chat", "bob", "7", None);
-        let frames = engine.publish("/q/chat", "Announcement");
+        let (frames, _) = engine.publish("/q/chat", "Announcement");
         assert_eq!(frames.len(), 2);
         // Both should be EVENT frames
-        assert!(frames.iter().all(|f| f.verb == "EVENT"));
+        assert!(frames.iter().all(|(_, f)| f.verb == "EVENT"));
+        // Peer IDs should match subscribers
+        let peers: Vec<&str> = frames.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(peers.contains(&"alice"));
+        assert!(peers.contains(&"bob"));
         // Lanes should match each subscriber's lane
-        let lanes: Vec<&str> = frames.iter().map(|f| f.header("Lane").unwrap()).collect();
+        let lanes: Vec<&str> = frames
+            .iter()
+            .map(|(_, f)| f.header("Lane").unwrap())
+            .collect();
         assert!(lanes.contains(&"5") || lanes.contains(&"7"));
     }
 
@@ -300,9 +351,9 @@ mod tests {
         let engine = EventEngine::new();
         // Publish some events first (need a subscriber to create topic)
         engine.subscribe("/q/log", "system", "0", None);
-        engine.publish("/q/log", "event-1");
-        engine.publish("/q/log", "event-2");
-        engine.publish("/q/log", "event-3");
+        let _ = engine.publish("/q/log", "event-1");
+        let _ = engine.publish("/q/log", "event-2");
+        let _ = engine.publish("/q/log", "event-3");
 
         // New subscriber asks for replay from seq 1 (gets events 2 and 3)
         let replay = engine.subscribe("/q/log", "alice", "5", Some(1));
@@ -315,8 +366,8 @@ mod tests {
     fn subscribe_replay_all() {
         let engine = EventEngine::new();
         engine.subscribe("/q/log", "system", "0", None);
-        engine.publish("/q/log", "event-1");
-        engine.publish("/q/log", "event-2");
+        let _ = engine.publish("/q/log", "event-1");
+        let _ = engine.publish("/q/log", "event-2");
 
         // since_seq = 0 means replay all
         let replay = engine.subscribe("/q/log", "bob", "3", Some(0));
@@ -332,7 +383,7 @@ mod tests {
         assert_eq!(engine.subscriber_count("/q/chat"), 0);
 
         // Publish should produce no broadcast frames
-        let frames = engine.publish("/q/chat", "nobody hears this");
+        let (frames, _) = engine.publish("/q/chat", "nobody hears this");
         assert!(frames.is_empty());
     }
 
@@ -346,9 +397,9 @@ mod tests {
     fn replay_standalone() {
         let engine = EventEngine::new();
         engine.subscribe("/q/log", "sys", "0", None);
-        engine.publish("/q/log", "a");
-        engine.publish("/q/log", "b");
-        engine.publish("/q/log", "c");
+        let _ = engine.publish("/q/log", "a");
+        let _ = engine.publish("/q/log", "b");
+        let _ = engine.publish("/q/log", "c");
 
         let frames = engine.replay("/q/log", 1, "9");
         assert_eq!(frames.len(), 2);
@@ -369,9 +420,9 @@ mod tests {
     fn event_sequence_numbers_increment() {
         let engine = EventEngine::new();
         engine.subscribe("/q/seq", "alice", "1", None);
-        engine.publish("/q/seq", "a");
-        engine.publish("/q/seq", "b");
-        engine.publish("/q/seq", "c");
+        let _ = engine.publish("/q/seq", "a");
+        let _ = engine.publish("/q/seq", "b");
+        let _ = engine.publish("/q/seq", "c");
         let events = engine.events("/q/seq");
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].seq, 1);
@@ -397,8 +448,9 @@ mod tests {
 
         // Next publish should get seq 3
         engine.subscribe("/q/restored", "alice", "1", None);
-        let frames = engine.publish("/q/restored", "new");
-        assert_eq!(frames[0].header("Seq"), Some("3"));
+        let (frames, event) = engine.publish("/q/restored", "new");
+        assert_eq!(frames[0].1.header("Seq"), Some("3"));
+        assert_eq!(event.seq, 3);
     }
 
     #[test]
@@ -406,7 +458,7 @@ mod tests {
         let engine = EventEngine::new();
         engine.subscribe("/q/prune", "sys", "0", None);
         for i in 0..10 {
-            engine.publish("/q/prune", &format!("event-{}", i));
+            let _ = engine.publish("/q/prune", &format!("event-{}", i));
         }
         assert_eq!(engine.event_count("/q/prune"), 10);
         engine.prune("/q/prune", 3);
@@ -429,7 +481,7 @@ mod tests {
     fn publish_to_topic_with_no_subscribers() {
         let engine = EventEngine::new();
         // Publish creates topic but no subscribers = no frames
-        let frames = engine.publish("/q/empty", "hello");
+        let (frames, _) = engine.publish("/q/empty", "hello");
         assert!(frames.is_empty());
         assert_eq!(engine.event_count("/q/empty"), 1);
     }

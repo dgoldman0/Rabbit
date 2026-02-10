@@ -248,8 +248,8 @@ async fn warren_discovery_menu() {
 
 #[tokio::test]
 async fn pubsub_across_tunnel() {
-    let mut server = Burrow::in_memory("hub");
-    server.require_auth = false;
+    // Use authenticated mode so the peer gets Subscribe + Publish caps.
+    let server = Burrow::in_memory("hub");
 
     let (mut c, mut s) = memory_tunnel_pair("c", "s");
     let sh = tokio::spawn(async move { server.handle_tunnel(&mut s).await });

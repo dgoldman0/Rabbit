@@ -10,5 +10,6 @@ pub mod dispatch;
 pub mod events;
 pub mod protocol;
 pub mod security;
+pub mod session;
 pub mod transport;
 pub mod warren;

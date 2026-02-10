@@ -14,22 +14,37 @@
 //!   incoming tunnel (handshake → dispatch → close).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::Duration;
 
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
+
+use std::sync::atomic::AtomicU32;
 
 use crate::config::Config;
 use crate::content::loader::load_content;
+use crate::content::search::SearchIndex;
 use crate::content::store::ContentStore;
+use crate::dispatch::idem_cache::IdemCache;
+use crate::dispatch::rate_limiter::RateLimiter;
 use crate::dispatch::router::{DispatchResult, Dispatcher};
 use crate::events::continuity::ContinuityStore;
 use crate::events::engine::EventEngine;
 use crate::protocol::error::ProtocolError;
+use crate::protocol::frame::Frame;
+use crate::protocol::lane_manager::LaneManager;
 use crate::security::auth::{build_auth_proof, build_hello, Authenticator};
 use crate::security::identity::Identity;
-use crate::security::permissions::CapabilityManager;
+use crate::security::permissions::{Capability, CapabilityManager};
 use crate::security::trust::TrustCache;
+use crate::session::SessionManager;
 use crate::transport::tunnel::Tunnel;
 use crate::warren::peers::PeerTable;
+use crate::warren::routing::RoutingTable;
+
+/// Global session counter for unique session IDs.
+static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A fully assembled burrow, ready to serve content and events.
 pub struct Burrow {
@@ -43,16 +58,46 @@ pub struct Burrow {
     pub events: EventEngine,
     /// Append-only event persistence.
     pub continuity: Option<ContinuityStore>,
-    /// TOFU trust cache.
-    pub trust: TrustCache,
-    /// Capability grants.
-    pub capabilities: CapabilityManager,
+    /// TOFU trust cache (interior mutability for concurrent tunnel access).
+    pub trust: Mutex<TrustCache>,
+    /// Capability grants (interior mutability for concurrent tunnel access).
+    pub capabilities: Mutex<CapabilityManager>,
     /// Known peers (warren membership).
     pub peers: PeerTable,
+    /// Session manager for cross-tunnel event fan-out.
+    pub sessions: SessionManager,
     /// Whether authentication is required for incoming connections.
     pub require_auth: bool,
     /// Base directory for the burrow's configuration.
     base_dir: PathBuf,
+    /// Keepalive interval in seconds (0 = disabled).
+    pub keepalive_secs: u64,
+    /// Handshake timeout in seconds.
+    pub handshake_timeout_secs: u64,
+    /// Maximum inbound frame size in bytes.
+    pub max_frame_bytes: usize,
+    /// Retransmission timeout in milliseconds.
+    pub retransmit_timeout_ms: u64,
+    /// Maximum retransmission attempts before giving up.
+    pub retransmit_max_retries: u32,
+    /// Full-text search index over content.
+    pub search_index: SearchIndex,
+    /// Interval for periodic OFFER broadcasts in seconds (0 = disabled).
+    pub offer_interval_secs: u64,
+    /// Routing table for multi-hop forwarding.
+    pub routing: RoutingTable,
+    /// Saved session states for resumption.
+    pub saved_sessions: std::sync::Mutex<Vec<crate::session::SavedSessionState>>,
+    /// Per-peer frame rate limiter.
+    pub rate_limiter: RateLimiter,
+    /// Idempotency token cache.
+    pub idem_cache: IdemCache,
+    /// Maximum concurrent tunnels (0 = unlimited).
+    pub max_connections: u32,
+    /// Maximum concurrent tunnels from the same peer (0 = unlimited).
+    pub max_per_peer: u32,
+    /// Current number of active tunnels.
+    pub active_connections: AtomicU32,
 }
 
 impl Burrow {
@@ -89,15 +134,30 @@ impl Burrow {
         // ── Event engine ───────────────────────────────────────
         let events = EventEngine::new();
 
-        // Load topics from config into the engine (pre-create them
-        // via a no-op publish so they show in topic lists).
-        // Actually we just ensure they exist; publishing "" would
-        // create noise.  For now topics are lazily created on first
-        // publish/subscribe.
-
         // ── Continuity store ───────────────────────────────────
         let events_dir = storage.join("events");
         let continuity = ContinuityStore::new(&events_dir).ok();
+
+        // Restore persisted events into the engine from continuity.
+        if let Some(ref cont) = continuity {
+            if let Ok(entries) = std::fs::read_dir(&events_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("log") {
+                        // Derive topic from filename: q_chat.log → /q/chat
+                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                            let topic = format!("/{}", stem.replace('_', "/"));
+                            if let Ok(loaded) = cont.load(&topic) {
+                                if !loaded.is_empty() {
+                                    info!(topic = %topic, count = loaded.len(), "restored events from continuity");
+                                    events.load_events(&topic, loaded);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // ── Trust cache ────────────────────────────────────────
         let trust_path = storage.join("trust.tsv");
@@ -108,8 +168,10 @@ impl Burrow {
         };
 
         // ── Capabilities and peers ─────────────────────────────
+        let sessions = SessionManager::new();
         let capabilities = CapabilityManager::new();
         let peers = PeerTable::new();
+        let search_index = SearchIndex::build_from_store(&content);
 
         Ok(Self {
             identity,
@@ -117,11 +179,29 @@ impl Burrow {
             content,
             events,
             continuity,
-            trust,
-            capabilities,
+            trust: Mutex::new(trust),
+            capabilities: Mutex::new(capabilities),
             peers,
+            sessions,
             require_auth: config.identity.require_auth,
             base_dir,
+            keepalive_secs: config.network.keepalive_secs,
+            handshake_timeout_secs: config.network.handshake_timeout_secs,
+            max_frame_bytes: config.network.max_frame_bytes,
+            retransmit_timeout_ms: config.network.retransmit_timeout_ms,
+            retransmit_max_retries: config.network.retransmit_max_retries,
+            search_index,
+            offer_interval_secs: config.network.offer_interval_secs,
+            routing: RoutingTable::new(),
+            saved_sessions: std::sync::Mutex::new(Vec::new()),
+            rate_limiter: RateLimiter::new(
+                config.network.rate_limit_fps,
+                config.network.publish_rate_limit_fps,
+            ),
+            idem_cache: IdemCache::new(config.network.idem_ttl_secs),
+            max_connections: config.network.max_connections,
+            max_per_peer: config.network.max_per_peer,
+            active_connections: AtomicU32::new(0),
         })
     }
 
@@ -136,11 +216,26 @@ impl Burrow {
             content: ContentStore::new(),
             events: EventEngine::new(),
             continuity: None,
-            trust: TrustCache::new(),
-            capabilities: CapabilityManager::new(),
+            trust: Mutex::new(TrustCache::new()),
+            capabilities: Mutex::new(CapabilityManager::new()),
             peers: PeerTable::new(),
+            sessions: SessionManager::new(),
             require_auth: true,
             base_dir: PathBuf::from("."),
+            keepalive_secs: 30,
+            handshake_timeout_secs: 10,
+            max_frame_bytes: 1_048_576,
+            retransmit_timeout_ms: 5000,
+            retransmit_max_retries: 3,
+            search_index: SearchIndex::build_from_store(&ContentStore::new()),
+            offer_interval_secs: 60,
+            routing: RoutingTable::new(),
+            saved_sessions: std::sync::Mutex::new(Vec::new()),
+            rate_limiter: RateLimiter::new(0, 0),
+            idem_cache: IdemCache::new(60),
+            max_connections: 0,
+            max_per_peer: 0,
+            active_connections: AtomicU32::new(0),
         }
     }
 
@@ -158,24 +253,355 @@ impl Burrow {
     pub fn save_trust(&self) -> Result<(), ProtocolError> {
         let storage = self.base_dir.join("data");
         let trust_path = storage.join("trust.tsv");
-        self.trust.save(&trust_path)
+        self.trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .save(&trust_path)
     }
 
     /// Create a [`Dispatcher`] that borrows this burrow's content,
-    /// event engine, and peer table.
+    /// event engine, peer table, capabilities, and continuity store.
     pub fn dispatcher(&self) -> Dispatcher<'_> {
-        Dispatcher::new(&self.content, &self.events).with_peers(&self.peers)
+        let mut d = Dispatcher::new(&self.content, &self.events)
+            .with_peers(&self.peers)
+            .with_capabilities(&self.capabilities)
+            .with_search_index(&self.search_index);
+        if let Some(ref cont) = self.continuity {
+            d = d.with_continuity(cont);
+        }
+        d
     }
 
     /// Run the server-side protocol loop on an incoming tunnel.
     ///
-    /// 1. Perform the HELLO/CHALLENGE/AUTH handshake.
-    /// 2. Dispatch frames until the tunnel is closed or an error
+    /// 1. Perform the HELLO/CHALLENGE/AUTH handshake (with timeout).
+    /// 2. TOFU: verify-or-remember the peer's public key.
+    /// 3. Grant default capabilities based on auth status.
+    /// 4. Dispatch frames with keepalive, retransmission, and frame
+    ///    size enforcement until the tunnel is closed or an error
     ///    occurs.
-    /// 3. Returns the authenticated peer ID (or "anonymous").
+    /// 5. Save trust cache on exit.
+    ///
+    /// Returns the authenticated peer ID (or "anonymous").
     #[instrument(skip(self, tunnel), fields(burrow = %self.name))]
     pub async fn handle_tunnel<T: Tunnel>(&self, tunnel: &mut T) -> Result<String, ProtocolError> {
-        // ── Handshake ──────────────────────────────────────────
+        // ── Connection limit enforcement (H3) ─────────────────
+        let current = self.active_connections.fetch_add(1, Ordering::Relaxed);
+        if self.max_connections > 0 && current >= self.max_connections {
+            self.active_connections.fetch_sub(1, Ordering::Relaxed);
+            let mut err = Frame::new("503 BUSY");
+            err.set_body("connection limit reached");
+            let _ = tunnel.send_frame(&err).await;
+            return Err(ProtocolError::InternalError(
+                "connection limit reached".into(),
+            ));
+        }
+
+        // ── Handshake (with timeout) ───────────────────────────
+        let handshake_timeout = Duration::from_secs(self.handshake_timeout_secs);
+        let peer_id =
+            match tokio::time::timeout(handshake_timeout, self.run_handshake(tunnel)).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    return Err(ProtocolError::Timeout("handshake timed out".into()));
+                }
+            };
+
+        // ── Dispatch loop with lane management ─────────────────
+        let dispatcher = self.dispatcher();
+        let lanes = LaneManager::new();
+
+        // Register this tunnel with the session manager for cross-
+        // tunnel event fan-out.  The receiver feeds the writer half.
+        let mut fanout_rx = self.sessions.register(&peer_id, 256);
+
+        // Keepalive state.
+        let keepalive_enabled = self.keepalive_secs > 0;
+        let mut keepalive_ticker =
+            tokio::time::interval(Duration::from_secs(if keepalive_enabled {
+                self.keepalive_secs
+            } else {
+                3600 // inert; never fires in practice
+            }));
+        keepalive_ticker.tick().await; // consume initial instant tick
+        let mut missed_pongs: u32 = 0;
+        let mut awaiting_pong = false;
+
+        // Retransmission state.
+        let retransmit_enabled = self.retransmit_timeout_ms > 0;
+        let retransmit_timeout = Duration::from_millis(self.retransmit_timeout_ms);
+        let retransmit_max = self.retransmit_max_retries;
+        let mut retransmit_ticker = tokio::time::interval(Duration::from_secs(1));
+        retransmit_ticker.tick().await; // consume initial instant tick
+
+        // Periodic OFFER state — advertise peer table to connected peer.
+        let offer_enabled = self.offer_interval_secs > 0;
+        let mut offer_ticker = tokio::time::interval(Duration::from_secs(if offer_enabled {
+            self.offer_interval_secs
+        } else {
+            3600 // inert; never fires in practice
+        }));
+        offer_ticker.tick().await; // consume initial instant tick
+
+        loop {
+            tokio::select! {
+                // ── Inbound: frames from the tunnel ────────────
+                inbound = tunnel.recv_frame() => {
+                    let frame = match inbound? {
+                        Some(f) => f,
+                        None => {
+                            debug!(peer_id = %peer_id, "tunnel closed");
+                            break;
+                        }
+                    };
+
+                    // ── Max frame size enforcement ─────────────
+                    if let Some(ref body) = frame.body {
+                        if body.len() > self.max_frame_bytes {
+                            let err_frame: Frame = ProtocolError::BadRequest(
+                                format!(
+                                    "frame body {} bytes exceeds limit {}",
+                                    body.len(),
+                                    self.max_frame_bytes
+                                ),
+                            )
+                            .into();
+                            tunnel.send_frame(&err_frame).await?;
+                            continue;
+                        }
+                    }
+
+                    // ── Rate limiting (H2) ─────────────────────
+                    if self.rate_limiter.is_enabled() {
+                        let is_publish = frame.verb == "PUBLISH";
+                        if !self.rate_limiter.check(&peer_id, is_publish) {
+                            let mut err = Frame::new("429 FLOW-LIMIT");
+                            err.set_body("rate limit exceeded");
+                            if let Some(lane) = frame.header("Lane") {
+                                err.set_header("Lane", lane);
+                            }
+                            tunnel.send_frame(&err).await?;
+                            continue;
+                        }
+                    }
+
+                    let lane_id: u16 = frame
+                        .header("Lane")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+
+                    // ── ACK/CREDIT/PONG: handle at tunnel level ─
+                    match frame.verb.as_str() {
+                        "PONG" => {
+                            awaiting_pong = false;
+                            missed_pongs = 0;
+                            continue;
+                        }
+                        "ACK" => {
+                            let ack_seq: u64 = frame
+                                .header("ACK")
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(0);
+                            lanes.ack(lane_id, ack_seq).await;
+                            let mut resp = Frame::new("200 OK");
+                            resp.set_header("Lane", lane_id.to_string());
+                            tunnel.send_frame(&resp).await?;
+                            continue;
+                        }
+                        "CREDIT" => {
+                            let n: u32 = frame
+                                .header("Credit")
+                                .and_then(|s| s.trim_start_matches('+').parse().ok())
+                                .unwrap_or(0);
+                            lanes.add_credit(lane_id, n).await;
+                            let mut resp = Frame::new("200 OK");
+                            resp.set_header("Lane", lane_id.to_string());
+                            tunnel.send_frame(&resp).await?;
+                            continue;
+                        }
+                        _ => {}
+                    }
+
+                    // ── Hop-Count enforcement for forwarded frames ──
+                    if let Some(target) = frame.header("Target") {
+                        if target != self.identity.burrow_id() {
+                            let hop_count: u32 = frame
+                                .header("Hop-Count")
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(8);
+                            if hop_count == 0 {
+                                let mut err = Frame::new("400 HOP LIMIT");
+                                err.set_body("hop count exceeded");
+                                if let Some(lane) = frame.header("Lane") {
+                                    err.set_header("Lane", lane);
+                                }
+                                tunnel.send_frame(&err).await?;
+                                continue;
+                            }
+                            // Forward to next hop via session manager.
+                            if let Some(next_hop) = self.routing.next_hop(target).await {
+                                let mut fwd = frame.clone();
+                                fwd.set_header("Hop-Count", (hop_count - 1).to_string());
+                                self.sessions.broadcast(vec![(next_hop, fwd)]).await;
+                                continue;
+                            } else {
+                                let mut err = Frame::new("404 NO ROUTE");
+                                err.set_body(format!("no route to {}", target));
+                                if let Some(lane) = frame.header("Lane") {
+                                    err.set_header("Lane", lane);
+                                }
+                                tunnel.send_frame(&err).await?;
+                                continue;
+                            }
+                        }
+                    }
+
+                    // ── Idempotency check (H4) ─────────────────
+                    if let Some(idem_token) = frame.header("Idem") {
+                        if let Some(cached) = self.idem_cache.get(idem_token) {
+                            tunnel.send_frame(&cached).await?;
+                            continue;
+                        }
+                    }
+
+                    // ── Timeout-enforced dispatch (H5) ────────────
+                    let timeout_secs: Option<u64> = frame
+                        .header("Timeout")
+                        .and_then(|s| s.parse().ok());
+
+                    let result: DispatchResult = if let Some(t) = timeout_secs {
+                        match tokio::time::timeout(
+                            Duration::from_secs(t),
+                            dispatcher.dispatch(&frame, &peer_id),
+                        ).await {
+                            Ok(r) => r,
+                            Err(_) => {
+                                let mut err = Frame::new("408 TIMEOUT");
+                                err.set_body("dispatch timed out");
+                                if let Some(lane) = frame.header("Lane") {
+                                    err.set_header("Lane", lane);
+                                }
+                                tunnel.send_frame(&err).await?;
+                                continue;
+                            }
+                        }
+                    } else {
+                        dispatcher.dispatch(&frame, &peer_id).await
+                    };
+
+                    // Cache response if Idem token is present.
+                    if let Some(idem_token) = frame.header("Idem") {
+                        self.idem_cache.insert(idem_token.to_string(), result.response.clone());
+                    }
+
+                    tunnel.send_frame(&result.response).await?;
+
+                    // Same-tunnel extras (e.g. SUBSCRIBE replay).
+                    for extra in &result.extras {
+                        tunnel.send_frame(extra).await?;
+                    }
+
+                    // Cross-tunnel broadcast via session manager.
+                    if !result.broadcast.is_empty() {
+                        self.sessions.broadcast(result.broadcast).await;
+                    }
+                }
+
+                // ── Outbound: fan-out frames from other tunnels ──
+                fanout = fanout_rx.recv() => {
+                    match fanout {
+                        Some(mut frame) => {
+                            // Assign sequence number for retransmission tracking.
+                            let lane_id: u16 = frame
+                                .header("Lane")
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(0);
+                            let seq = lanes.next_seq(lane_id).await;
+                            frame.set_header("Seq", seq.to_string());
+                            if retransmit_enabled {
+                                let data = frame.serialize();
+                                lanes.record_sent(lane_id, seq, data).await;
+                            }
+                            tunnel.send_frame(&frame).await?;
+                        }
+                        None => {
+                            // Session manager dropped our channel —
+                            // another connection replaced us.
+                            debug!(peer_id = %peer_id, "session channel closed");
+                            break;
+                        }
+                    }
+                }
+
+                // ── Keepalive timer ────────────────────────────
+                _ = keepalive_ticker.tick(), if keepalive_enabled => {
+                    if awaiting_pong {
+                        missed_pongs += 1;
+                        if missed_pongs >= 3 {
+                            warn!(peer_id = %peer_id, "3 missed pongs — closing tunnel");
+                            break;
+                        }
+                    }
+                    let ping = Frame::new("PING");
+                    tunnel.send_frame(&ping).await?;
+                    awaiting_pong = true;
+                }
+
+                // ── Retransmission check ───────────────────────
+                _ = retransmit_ticker.tick(), if retransmit_enabled => {
+                    match lanes.check_retransmissions(retransmit_timeout, retransmit_max).await {
+                        Ok(resends) => {
+                            for data in resends {
+                                if let Ok(frame) = Frame::parse(&data) {
+                                    debug!(peer_id = %peer_id, verb = %frame.verb, "retransmitting frame");
+                                    tunnel.send_frame(&frame).await?;
+                                }
+                            }
+                        }
+                        Err(seq) => {
+                            warn!(peer_id = %peer_id, seq = seq, "frame exceeded max retries — closing tunnel");
+                            break;
+                        }
+                    }
+                }
+
+                // ── Periodic OFFER — advertise peer table ──────
+                _ = offer_ticker.tick(), if offer_enabled => {
+                    let peers_list = self.peers.list().await;
+                    if !peers_list.is_empty() {
+                        let mut body = String::new();
+                        for p in &peers_list {
+                            body.push_str(&p.id);
+                            body.push('\t');
+                            body.push_str(&p.address);
+                            body.push('\t');
+                            body.push_str(&p.name);
+                            body.push('\n');
+                        }
+                        let mut offer = Frame::with_args("OFFER", vec!["/warren".into()]);
+                        offer.set_body(body);
+                        debug!(peer_id = %peer_id, count = peers_list.len(), "sending periodic OFFER");
+                        tunnel.send_frame(&offer).await?;
+                    }
+                }
+            }
+        }
+
+        // ── Cleanup ────────────────────────────────────────────
+        self.active_connections.fetch_sub(1, Ordering::Relaxed);
+        self.rate_limiter.remove_peer(&peer_id);
+        self.sessions.unregister(&peer_id);
+
+        if let Err(e) = self.save_trust() {
+            warn!(error = %e, "failed to save trust cache on tunnel close");
+        }
+
+        Ok(peer_id)
+    }
+
+    /// Perform the server-side handshake (HELLO / CHALLENGE / AUTH),
+    /// TOFU verification, and capability grants.  Returns the peer ID.
+    async fn run_handshake<T: Tunnel>(&self, tunnel: &mut T) -> Result<String, ProtocolError> {
         let mut auth = Authenticator::new(
             Identity::from_bytes(self.identity.public_key_bytes(), self.identity.seed_bytes())?,
             self.require_auth,
@@ -189,7 +615,6 @@ impl Burrow {
         tunnel.send_frame(&response).await?;
 
         if !auth.is_authenticated() {
-            // Must be challenge-sent — wait for AUTH PROOF.
             let auth_frame = tunnel
                 .recv_frame()
                 .await?
@@ -198,24 +623,52 @@ impl Burrow {
             tunnel.send_frame(&ok).await?;
         }
 
-        let peer_id = auth.peer_id().unwrap_or("anonymous").to_string();
-        debug!(peer_id = %peer_id, "handshake complete");
+        let base_id = auth.peer_id().unwrap_or("anonymous").to_string();
+        let peer_id = if base_id == "anonymous" {
+            let n = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+            format!("anonymous-{n}")
+        } else {
+            base_id
+        };
 
-        // ── Dispatch loop ──────────────────────────────────────
-        let dispatcher = self.dispatcher();
-        loop {
-            let frame = match tunnel.recv_frame().await? {
-                Some(f) => f,
-                None => {
-                    debug!(peer_id = %peer_id, "tunnel closed");
-                    break;
-                }
-            };
+        // ── Session resumption check ───────────────────────
+        let resumed = if let Some(resume_token) = hello.header("Resume") {
+            let saved = self
+                .saved_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            saved
+                .iter()
+                .any(|s| s.session_token == resume_token && s.peer_id == peer_id)
+        } else {
+            false
+        };
+        if resumed {
+            debug!(peer_id = %peer_id, "session resumed");
+        } else {
+            debug!(peer_id = %peer_id, "handshake complete (fresh session)");
+        }
 
-            let result: DispatchResult = dispatcher.dispatch(&frame, &peer_id).await;
-            tunnel.send_frame(&result.response).await?;
-            for extra in &result.extras {
-                tunnel.send_frame(extra).await?;
+        // ── TOFU trust verification ────────────────────────────
+        if let Some(peer_pubkey) = auth.peer_pubkey() {
+            self.trust
+                .lock()
+                .unwrap()
+                .verify_or_remember(&peer_id, &peer_pubkey)?;
+            debug!(peer_id = %peer_id, "TOFU verified");
+        }
+
+        // ── Default capability grants ──────────────────────────
+        {
+            let mut caps = self.capabilities.lock().unwrap_or_else(|e| e.into_inner());
+            if peer_id.starts_with("anonymous") {
+                caps.grant(&peer_id, Capability::Fetch, 86400);
+                caps.grant(&peer_id, Capability::List, 86400);
+            } else {
+                caps.grant(&peer_id, Capability::Fetch, 86400);
+                caps.grant(&peer_id, Capability::List, 86400);
+                caps.grant(&peer_id, Capability::Subscribe, 86400);
+                caps.grant(&peer_id, Capability::Publish, 86400);
             }
         }
 
@@ -351,6 +804,12 @@ file = "readme.txt"
         burrow
             .content
             .register_menu("/", vec![MenuItem::info("hello")]);
+        // Grant List capability to the test peer.
+        burrow
+            .capabilities
+            .lock()
+            .unwrap()
+            .grant("test-peer", Capability::List, 3600);
 
         let dispatcher = burrow.dispatcher();
         let frame = Frame::with_args("LIST", vec!["/".into()]);
@@ -446,8 +905,8 @@ file = "readme.txt"
 
     #[tokio::test]
     async fn handle_tunnel_pub_sub() {
-        let mut server = Burrow::in_memory("server");
-        server.require_auth = false;
+        // Use authenticated mode so the peer gets Subscribe + Publish caps.
+        let server = Burrow::in_memory("server");
 
         let (mut c, mut s) = memory_tunnel_pair("c", "s");
 

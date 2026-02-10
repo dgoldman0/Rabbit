@@ -6,12 +6,14 @@
 //! that returns a [`TlsTunnel`](super::tls::TlsTunnel).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, Error, SignatureScheme};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
+use tracing::{info, warn};
 
 use crate::protocol::error::ProtocolError;
 
@@ -23,10 +25,14 @@ use super::tls::TlsTunnel;
 /// via the protocol-level Ed25519 handshake and TOFU cache, not via
 /// certificate chain validation.
 pub fn make_client_config_insecure() -> Arc<ClientConfig> {
-    let config = ClientConfig::builder()
+    let mut config = ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier))
         .with_no_client_auth();
+
+    // H1: Set ALPN protocol to "rabbit/1" for protocol identification.
+    config.alpn_protocols = vec![b"rabbit/1".to_vec()];
+
     Arc::new(config)
 }
 
@@ -53,6 +59,46 @@ pub async fn connect(
     })?;
 
     Ok(TlsTunnel::new(tls_stream, "unknown".to_string()))
+}
+
+/// Connect to a Rabbit burrow with exponential backoff.
+///
+/// Retries the connection on failure, starting with a 1-second delay
+/// and doubling up to `max_backoff`.  After `max_retries` failures,
+/// returns the last error.
+pub async fn connect_with_backoff(
+    addr: &str,
+    client_config: Arc<ClientConfig>,
+    server_name: &str,
+    max_retries: u32,
+    max_backoff: Duration,
+) -> Result<TlsTunnel<tokio_rustls::client::TlsStream<TcpStream>>, ProtocolError> {
+    let mut delay = Duration::from_secs(1);
+    let mut last_err = None;
+
+    for attempt in 1..=max_retries {
+        match connect(addr, client_config.clone(), server_name).await {
+            Ok(tunnel) => {
+                if attempt > 1 {
+                    info!(addr, attempt, "connected after retries");
+                }
+                return Ok(tunnel);
+            }
+            Err(e) => {
+                warn!(addr, attempt, max_retries, error = %e, "connect failed, retrying");
+                last_err = Some(e);
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(max_backoff);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        ProtocolError::InternalError(format!(
+            "connect to {} failed after {} retries",
+            addr, max_retries
+        ))
+    }))
 }
 
 // ── Insecure certificate verifier (TOFU model) ────────────────

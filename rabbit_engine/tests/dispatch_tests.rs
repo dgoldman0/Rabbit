@@ -119,10 +119,13 @@ async fn dispatch_subscribe_and_publish() {
     assert_eq!(result.response.args, vec!["DONE"]);
     assert_eq!(result.response.header("Txn"), Some("T-11"));
     // Extras should contain the EVENT broadcast for alice
-    assert_eq!(result.extras.len(), 1);
-    assert_eq!(result.extras[0].verb, "EVENT");
-    assert_eq!(result.extras[0].body.as_deref(), Some("Hello everyone!"));
-    assert_eq!(result.extras[0].header("Lane"), Some("5")); // alice's lane
+    assert_eq!(result.broadcast.len(), 1);
+    assert_eq!(result.broadcast[0].1.verb, "EVENT");
+    assert_eq!(
+        result.broadcast[0].1.body.as_deref(),
+        Some("Hello everyone!")
+    );
+    assert_eq!(result.broadcast[0].1.header("Lane"), Some("5")); // alice's lane
 }
 
 #[tokio::test]
@@ -175,11 +178,11 @@ async fn dispatch_two_subscribers_both_receive() {
     pub_frame.set_body("Breaking news!");
     let result = d.dispatch(&pub_frame, "editor").await;
     // Both subscribers should get events
-    assert_eq!(result.extras.len(), 2);
+    assert_eq!(result.broadcast.len(), 2);
     let lanes: Vec<&str> = result
-        .extras
+        .broadcast
         .iter()
-        .filter_map(|f| f.header("Lane"))
+        .filter_map(|(_, f)| f.header("Lane"))
         .collect();
     assert!(lanes.contains(&"3"));
     assert!(lanes.contains(&"4"));

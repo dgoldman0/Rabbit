@@ -115,6 +115,28 @@ pub struct NetworkConfig {
     pub port: u16,
     /// Peer addresses to connect to on startup.
     pub peers: Vec<String>,
+    /// Keepalive interval in seconds (0 = disabled, default 30).
+    pub keepalive_secs: u64,
+    /// Handshake timeout in seconds (default 10).
+    pub handshake_timeout_secs: u64,
+    /// Maximum frame body size in bytes (default 1 MB).
+    pub max_frame_bytes: usize,
+    /// Retransmission timeout in milliseconds (default 5000).
+    pub retransmit_timeout_ms: u64,
+    /// Maximum retransmission attempts before giving up (default 3).
+    pub retransmit_max_retries: u32,
+    /// Interval for periodic OFFER broadcasts in seconds (0 = disabled, default 60).
+    pub offer_interval_secs: u64,
+    /// Maximum frames per second per peer (0 = unlimited, default 100).
+    pub rate_limit_fps: u32,
+    /// Maximum PUBLISH frames per second per peer (0 = unlimited, default 10).
+    pub publish_rate_limit_fps: u32,
+    /// Maximum concurrent tunnels per burrow (0 = unlimited, default 64).
+    pub max_connections: u32,
+    /// Maximum concurrent tunnels from the same peer (0 = unlimited, default 4).
+    pub max_per_peer: u32,
+    /// Idempotency token cache TTL in seconds (default 60).
+    pub idem_ttl_secs: u64,
 }
 
 impl Default for NetworkConfig {
@@ -122,6 +144,17 @@ impl Default for NetworkConfig {
         Self {
             port: 7443,
             peers: Vec::new(),
+            keepalive_secs: 30,
+            handshake_timeout_secs: 10,
+            max_frame_bytes: 1_048_576,
+            retransmit_timeout_ms: 5000,
+            retransmit_max_retries: 3,
+            offer_interval_secs: 60,
+            rate_limit_fps: 100,
+            publish_rate_limit_fps: 10,
+            max_connections: 64,
+            max_per_peer: 4,
+            idem_ttl_secs: 60,
         }
     }
 }
@@ -134,6 +167,8 @@ pub struct ContentConfig {
     pub menus: Vec<MenuConfig>,
     /// Text content definitions.
     pub text: Vec<TextConfig>,
+    /// Binary content definitions.
+    pub binary: Vec<BinaryConfig>,
     /// Event topic definitions.
     pub topics: Vec<TopicConfig>,
 }
@@ -187,6 +222,17 @@ pub struct TextConfig {
 pub struct TopicConfig {
     /// Topic path (e.g. `/q/chat`).
     pub path: String,
+}
+
+/// A binary content definition in config.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BinaryConfig {
+    /// Selector path (e.g. `/9/logo.png`).
+    pub selector: String,
+    /// Path to the binary file, resolved relative to config directory.
+    pub file: String,
+    /// MIME type (e.g. `image/png`, `application/octet-stream`).
+    pub mime: String,
 }
 
 #[cfg(test)]
@@ -297,6 +343,27 @@ items = [
 "#;
         let cfg = Config::parse(toml).unwrap();
         assert_eq!(cfg.content.menus[0].items[0].burrow, "ed25519:ABCDE");
+    }
+
+    #[test]
+    fn parse_binary_config() {
+        let toml = r#"
+[[content.binary]]
+selector = "/9/logo"
+file = "assets/logo.png"
+mime = "image/png"
+
+[[content.binary]]
+selector = "/9/data"
+file = "data.bin"
+mime = "application/octet-stream"
+"#;
+        let cfg = Config::parse(toml).unwrap();
+        assert_eq!(cfg.content.binary.len(), 2);
+        assert_eq!(cfg.content.binary[0].selector, "/9/logo");
+        assert_eq!(cfg.content.binary[0].file, "assets/logo.png");
+        assert_eq!(cfg.content.binary[0].mime, "image/png");
+        assert_eq!(cfg.content.binary[1].mime, "application/octet-stream");
     }
 
     #[test]

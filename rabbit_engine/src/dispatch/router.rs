@@ -5,40 +5,65 @@
 //! frame for every incoming frame.  Unknown verbs yield `400 BAD
 //! REQUEST`.
 
+use std::sync::Mutex;
+
 use crate::content::handler as content_handler;
+use crate::content::search::SearchIndex;
 use crate::content::store::{ContentEntry, ContentStore};
-use crate::events::engine::EventEngine;
+use crate::events::continuity::ContinuityStore;
+use crate::events::engine::{EventEngine, QoS};
 use crate::events::handler as event_handler;
 use crate::protocol::error::ProtocolError;
 use crate::protocol::frame::Frame;
+use crate::security::permissions::{Capability, CapabilityManager};
 use crate::warren::discovery;
 use crate::warren::peers::PeerTable;
 
 /// Result of dispatching a frame.
 ///
 /// Most verbs produce a single response.  `SUBSCRIBE` may produce an
-/// initial response *and* replay frames, so we return a `Vec`.
+/// initial response *and* replay frames (in `extras`).  `PUBLISH`
+/// produces a response for the publisher and targeted broadcast
+/// frames (in `broadcast`) that should be fanned out to subscriber
+/// tunnels via the session manager.
 #[derive(Debug)]
 pub struct DispatchResult {
     /// The primary response frame.
     pub response: Frame,
-    /// Additional frames to send after the response (e.g. replayed
-    /// events after a SUBSCRIBE acknowledgement).
+    /// Additional frames to send to the *same* tunnel after the
+    /// response (e.g. replayed events after SUBSCRIBE).
     pub extras: Vec<Frame>,
+    /// Targeted broadcast frames: `(peer_id, frame)` pairs to be
+    /// fanned out to other tunnels via the session manager.
+    pub broadcast: Vec<(String, Frame)>,
 }
 
 impl DispatchResult {
-    /// Create a result with a single response and no extras.
+    /// Create a result with a single response, no extras, no broadcast.
     pub fn single(response: Frame) -> Self {
         Self {
             response,
             extras: Vec::new(),
+            broadcast: Vec::new(),
         }
     }
 
-    /// Create a result with a response and additional frames.
+    /// Create a result with a response and same-tunnel extras.
     pub fn with_extras(response: Frame, extras: Vec<Frame>) -> Self {
-        Self { response, extras }
+        Self {
+            response,
+            extras,
+            broadcast: Vec::new(),
+        }
+    }
+
+    /// Create a result with a response and cross-tunnel broadcast.
+    pub fn with_broadcast(response: Frame, broadcast: Vec<(String, Frame)>) -> Self {
+        Self {
+            response,
+            extras: Vec::new(),
+            broadcast,
+        }
     }
 }
 
@@ -54,6 +79,12 @@ pub struct Dispatcher<'a> {
     events: &'a EventEngine,
     /// Peer table for dynamic `/warren` discovery (optional).
     peers: Option<&'a PeerTable>,
+    /// Capability manager for permission enforcement (optional).
+    capabilities: Option<&'a Mutex<CapabilityManager>>,
+    /// Continuity store for event persistence (optional).
+    continuity: Option<&'a ContinuityStore>,
+    /// Search index for SEARCH queries (optional).
+    search_index: Option<&'a SearchIndex>,
 }
 
 impl<'a> Dispatcher<'a> {
@@ -63,6 +94,9 @@ impl<'a> Dispatcher<'a> {
             content,
             events,
             peers: None,
+            capabilities: None,
+            continuity: None,
+            search_index: None,
         }
     }
 
@@ -72,6 +106,38 @@ impl<'a> Dispatcher<'a> {
         self
     }
 
+    /// Attach a capability manager for permission enforcement.
+    pub fn with_capabilities(mut self, caps: &'a Mutex<CapabilityManager>) -> Self {
+        self.capabilities = Some(caps);
+        self
+    }
+
+    /// Attach a continuity store for event persistence.
+    pub fn with_continuity(mut self, store: &'a ContinuityStore) -> Self {
+        self.continuity = Some(store);
+        self
+    }
+
+    /// Attach a search index for SEARCH queries.
+    pub fn with_search_index(mut self, index: &'a SearchIndex) -> Self {
+        self.search_index = Some(index);
+        self
+    }
+
+    /// Check whether a peer has a specific capability.
+    ///
+    /// If no capability manager is attached, all operations are
+    /// permitted (backward-compatible).
+    fn check_cap(&self, peer_id: &str, cap: Capability) -> bool {
+        match &self.capabilities {
+            Some(mgr) => mgr
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .check(peer_id, cap),
+            None => true,
+        }
+    }
+
     /// Dispatch a single incoming frame and return the response(s).
     ///
     /// The `peer_id` identifies the sender (used for subscriber
@@ -79,31 +145,60 @@ impl<'a> Dispatcher<'a> {
     pub async fn dispatch(&self, frame: &Frame, peer_id: &str) -> DispatchResult {
         match frame.verb.as_str() {
             // ── Content ────────────────────────────────────────
-            "LIST" | "FETCH" => {
+            "LIST" => {
+                let required = Capability::List;
+                if !self.check_cap(peer_id, required) {
+                    return DispatchResult::single(
+                        ProtocolError::Forbidden(format!("{peer_id} lacks {required:?}")).into(),
+                    );
+                }
                 let selector = frame.args.first().map(|s| s.as_str()).unwrap_or("/");
-                // Dynamic warren discovery — serve /warren from the
-                // peer table instead of the static content store.
                 if selector == "/warren" {
                     if let Some(peers) = self.peers {
                         let response = self.warren_response(peers, frame).await;
                         return DispatchResult::single(response);
                     }
                 }
-                let response = if frame.verb == "LIST" {
-                    content_handler::handle_list(self.content, selector, frame)
-                } else {
-                    content_handler::handle_fetch(self.content, selector, frame)
-                };
+                let response = content_handler::handle_list(self.content, selector, frame);
+                DispatchResult::single(response)
+            }
+            "FETCH" => {
+                let required = Capability::Fetch;
+                if !self.check_cap(peer_id, required) {
+                    return DispatchResult::single(
+                        ProtocolError::Forbidden(format!("{peer_id} lacks {required:?}")).into(),
+                    );
+                }
+                let selector = frame.args.first().map(|s| s.as_str()).unwrap_or("/");
+                if selector == "/warren" {
+                    if let Some(peers) = self.peers {
+                        let response = self.warren_response(peers, frame).await;
+                        return DispatchResult::single(response);
+                    }
+                }
+                let response = content_handler::handle_fetch(self.content, selector, frame);
                 DispatchResult::single(response)
             }
 
             // ── Events ─────────────────────────────────────────
             "SUBSCRIBE" => {
+                let required = Capability::Subscribe;
+                if !self.check_cap(peer_id, required) {
+                    return DispatchResult::single(
+                        ProtocolError::Forbidden(format!("{peer_id} lacks {required:?}")).into(),
+                    );
+                }
                 let topic = frame.args.first().map(|s| s.as_str()).unwrap_or("");
                 let since_seq = frame.header("Since").and_then(|s| s.parse::<u64>().ok());
                 let lane = frame.header("Lane").unwrap_or("0").to_string();
                 let txn = frame.header("Txn").unwrap_or("").to_string();
-                let result = self.events.subscribe(topic, peer_id, &lane, since_seq);
+                let qos = frame
+                    .header("QoS")
+                    .map(QoS::from_header)
+                    .unwrap_or(QoS::Event);
+                let result = self
+                    .events
+                    .subscribe_with_qos(topic, peer_id, &lane, since_seq, qos);
                 let mut response = Frame::new("201 SUBSCRIBED");
                 if !lane.is_empty() {
                     response.set_header("Lane", &lane);
@@ -114,11 +209,25 @@ impl<'a> Dispatcher<'a> {
                 DispatchResult::with_extras(response, result)
             }
             "PUBLISH" => {
+                let required = Capability::Publish;
+                if !self.check_cap(peer_id, required) {
+                    return DispatchResult::single(
+                        ProtocolError::Forbidden(format!("{peer_id} lacks {required:?}")).into(),
+                    );
+                }
                 let topic = frame.args.first().map(|s| s.as_str()).unwrap_or("");
                 let body = frame.body.as_deref().unwrap_or("");
                 let lane = frame.header("Lane").unwrap_or("0").to_string();
                 let txn = frame.header("Txn").unwrap_or("").to_string();
-                let broadcast = event_handler::handle_publish(self.events, topic, body);
+                let (broadcast, event) = event_handler::handle_publish(self.events, topic, body);
+
+                // Persist to continuity store if available.
+                if let Some(cont) = self.continuity {
+                    if let Err(e) = cont.append(topic, &event) {
+                        tracing::warn!(topic, error = %e, "continuity append failed");
+                    }
+                }
+
                 let mut response = Frame::new("204 DONE");
                 if !lane.is_empty() {
                     response.set_header("Lane", &lane);
@@ -126,9 +235,7 @@ impl<'a> Dispatcher<'a> {
                 if !txn.is_empty() {
                     response.set_header("Txn", &txn);
                 }
-                // Return the broadcast frames as extras so the caller
-                // can route them to the correct subscriber tunnels.
-                DispatchResult::with_extras(response, broadcast)
+                DispatchResult::with_broadcast(response, broadcast)
             }
 
             // ── Keepalive ──────────────────────────────────────
@@ -150,6 +257,152 @@ impl<'a> Dispatcher<'a> {
                     ack_resp.set_header("Lane", lane);
                 }
                 DispatchResult::single(ack_resp)
+            }
+
+            // ── Metadata ────────────────────────────────────────
+            "DESCRIBE" => {
+                let selector = frame.args.first().map(|s| s.as_str()).unwrap_or("/");
+                let response =
+                    content_handler::handle_describe(self.content, self.events, selector, frame);
+                DispatchResult::single(response)
+            }
+
+            // ── Search ─────────────────────────────────────────
+            "SEARCH" => {
+                let selector = frame.args.first().map(|s| s.as_str()).unwrap_or("/");
+                match &self.search_index {
+                    Some(index) => {
+                        let response = content_handler::handle_search(index, selector, frame);
+                        DispatchResult::single(response)
+                    }
+                    None => {
+                        // No index built — return empty menu.
+                        let mut response = Frame::new("200 MENU");
+                        if let Some(lane) = frame.header("Lane") {
+                            response.set_header("Lane", lane);
+                        }
+                        response.set_header("View", "text/rabbitmap");
+                        response.set_body(".\r\n");
+                        DispatchResult::single(response)
+                    }
+                }
+            }
+
+            // ── Delegation ──────────────────────────────────────
+            "DELEGATE" => {
+                // DELEGATE <capability> <target_burrow_id>
+                // Requires ManageBurrows capability.
+                let required = Capability::ManageBurrows;
+                if !self.check_cap(peer_id, required) {
+                    return DispatchResult::single(
+                        ProtocolError::Forbidden(format!("{peer_id} lacks {required:?}")).into(),
+                    );
+                }
+
+                let cap_label = match frame.args.first() {
+                    Some(c) => c.as_str(),
+                    None => {
+                        return DispatchResult::single(
+                            ProtocolError::BadRequest(
+                                "DELEGATE requires <capability> argument".into(),
+                            )
+                            .into(),
+                        );
+                    }
+                };
+                let target = match frame.args.get(1) {
+                    Some(t) => t.clone(),
+                    None => {
+                        return DispatchResult::single(
+                            ProtocolError::BadRequest("DELEGATE requires <target> argument".into())
+                                .into(),
+                        );
+                    }
+                };
+                let cap = match Capability::from_label(cap_label) {
+                    Some(c) => c,
+                    None => {
+                        return DispatchResult::single(
+                            ProtocolError::BadRequest(format!("unknown capability: {cap_label}"))
+                                .into(),
+                        );
+                    }
+                };
+                let ttl: u64 = frame
+                    .header("TTL")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(3600);
+
+                // Grant the capability to the target.
+                if let Some(mgr) = self.capabilities {
+                    mgr.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .grant(&target, cap, ttl);
+                }
+
+                let mut response = Frame::new("200 OK");
+                response.set_header("Capability", cap_label);
+                response.set_header("Target", &target);
+                response.set_header("TTL", ttl.to_string());
+                if let Some(lane) = frame.header("Lane") {
+                    response.set_header("Lane", lane);
+                }
+                if let Some(txn) = frame.header("Txn") {
+                    response.set_header("Txn", txn);
+                }
+
+                // If the target is a connected peer, forward the
+                // grant as a DELEGATE-GRANT frame via broadcast.
+                let mut grant_frame =
+                    Frame::with_args("DELEGATE-GRANT", vec![cap_label.to_string()]);
+                grant_frame.set_header("TTL", ttl.to_string());
+                grant_frame.set_header("Granted-By", peer_id);
+
+                let broadcast = vec![(target, grant_frame)];
+                DispatchResult::with_broadcast(response, broadcast)
+            }
+
+            // ── Peer advertisement ─────────────────────────────
+            "OFFER" => {
+                // OFFER body: tab-separated peer lines
+                //   id\taddress\tname
+                // Requires Federation capability.
+                let required = Capability::Federation;
+                if !self.check_cap(peer_id, required) {
+                    return DispatchResult::single(
+                        ProtocolError::Forbidden(format!("{peer_id} lacks {required:?}")).into(),
+                    );
+                }
+
+                let body = frame.body.as_deref().unwrap_or("");
+                let mut accepted = 0usize;
+                if let Some(peers) = self.peers {
+                    for line in body.lines() {
+                        let parts: Vec<&str> = line.split('\t').collect();
+                        if parts.len() >= 2 {
+                            let id = parts[0].to_string();
+                            let address = parts[1].to_string();
+                            let name = if parts.len() >= 3 {
+                                parts[2].to_string()
+                            } else {
+                                String::new()
+                            };
+                            let peer_info = crate::warren::peers::PeerInfo::new(id, address, name);
+                            peers.register(peer_info).await;
+                            accepted += 1;
+                        }
+                    }
+                }
+
+                let mut response = Frame::new("200 OK");
+                response.set_header("Accepted", accepted.to_string());
+                if let Some(lane) = frame.header("Lane") {
+                    response.set_header("Lane", lane);
+                }
+                if let Some(txn) = frame.header("Txn") {
+                    response.set_header("Txn", txn);
+                }
+                DispatchResult::single(response)
             }
 
             // ── Unknown verb ───────────────────────────────────

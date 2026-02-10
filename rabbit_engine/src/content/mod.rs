@@ -7,4 +7,5 @@
 
 pub mod handler;
 pub mod loader;
+pub mod search;
 pub mod store;
