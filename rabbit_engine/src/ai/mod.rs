@@ -4,4 +4,5 @@
 //! OpenAI-compatible APIs, and the background connector that
 //! bridges the event engine to the LLM.
 
+pub mod http;
 pub mod types;
