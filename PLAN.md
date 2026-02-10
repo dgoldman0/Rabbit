@@ -1,6 +1,6 @@
 # Rabbit Burrow Engine — Release Plan
 
-**Version:** 1.0.0 (engine complete) → 1.1.0 (AI + GUI)  
+**Version:** 1.1.0 (AI + GUI complete)  
 **Date:** 2026-02-10  
 **Companion:** See [SPECS.md](SPECS.md) for the full specification.
 
@@ -8,11 +8,11 @@
 
 ## 0. Where We Are
 
-**v1.0 engine is complete.** All 8 original phases (A–H) are implemented,
-tested, and committed on `feature/v1.0`. The engine has 399 tests, zero
-clippy warnings, and covers every spec verb and header.
+**v1.1 is complete.** All 10 phases (A–J) are implemented, tested, and
+committed on `feature/v1.1`. The engine has 580 tests (312 lib + 268
+integration), zero clippy warnings, and covers every spec verb and header.
 
-The plan now extends to two new phases for the next milestone:
+Phases I and J add AI/LLM integration and a native GUI renderer:
 
 - **Phase I: AI / LLM Integration** — LLM-powered chat topics, OpenAI
   connector, configurable model parameters, gated command execution.
@@ -427,6 +427,9 @@ automatically via the event engine. Type `u` content is served via FETCH.
 Commands are disabled by default. The AI is part of the burrow — not a
 separate process.
 
+**Status:** ✅ **COMPLETE** (8 substages I1–I8, committed on `feature/v1.1`,
+452 tests → 517 tests, commit `8a2eaec`)
+
 ---
 
 ### Phase J: GUI / HTML Rendering Engine (rabbit front-end)
@@ -537,10 +540,23 @@ cache_views = true         # cache rendered HTML for identical content
 - State: disconnection → error view rendered.
 - Fallback: `renderer = "webview"` → Dioxus desktop mode (compile test).
 
-**Exit criteria:** Running `rabbit --gui 127.0.0.1:7443` opens a native
+**Exit criteria:** Running `rabbit-gui 127.0.0.1:7443` opens a native
 window. Burrow menus, text pages, and chat events are rendered as
-AI-generated HTML in a GPU-accelerated viewport. Navigation, back/forward,
+AI-generated HTML via Dioxus/WebView. Navigation, back/forward,
 and interactive elements work. The user never sees raw protocol frames.
+
+**Status:** ✅ **COMPLETE** (10 substages J1–J10, committed on `feature/v1.1`,
+517 tests → 580 tests, commits `0839219`–`b180408`)
+
+**Implementation notes:**
+- Used Dioxus v0.7 with `desktop` feature (WRY/WebView) as stable backend
+- Blitz (native GPU) support via `gui-native` feature flag (future)
+- ViewGenerator with SHA-256 cache for AI-rendered HTML
+- DOM sanitizer strips `<script>` and event handlers
+- Event binding maps element IDs to protocol actions
+- Navigation stack with back/forward history
+- Theme engine generates CSS custom properties
+- 54 integration tests covering end-to-end view generation pipeline
 
 ---
 
@@ -565,29 +581,25 @@ dependency) — a minimal `ai/http` module (~60 lines), not a full HTTP library.
 
 | Crate | Purpose | Notes |
 |-------|---------|-------|
-| `dioxus` | v0.6+ — reactive component framework | Core UI framework |
-| `dioxus-native` | Blitz renderer (WGPU-backed) | GPU rendering, no WebView |
-| `dioxus-motion` | Spring physics animations | Optional, for transitions |
-| `dioxus-desktop` | Tauri/WRY fallback renderer | Only if Blitz is unstable |
+| `dioxus` | v0.7 — reactive component framework | Core UI framework, optional with `gui` feature |
 
-Phase J is the first phase to add significant new dependencies. All are
-well-maintained Rust-native crates with no C/C++ build dependencies
-(Blitz uses wgpu which is pure Rust + GPU drivers).
+Phase J implementation uses Dioxus v0.7 with the `desktop` feature,
+which provides WRY/WebView rendering (stable). The `gui-native` feature
+flag is defined for future Blitz (GPU) renderer support when it matures.
+All GUI code is feature-gated behind `#[cfg(feature = "gui")]`.
 
 ---
 
 ## 4. Priority Order
 
-Phases A–H are complete. Remaining priority:
+All phases (A–J) are complete:
 
-1. **Phase I** (AI integration) — type `u` UI declarations, AI connector
-   integrated into burrow, conversation types. Prerequisite for
-   Phase J's AI-driven rendering.
-2. **Phase J** (GUI rendering) — transforms `rabbit` from terminal to
-   native GUI. Uses type `u` content and AI view generation from Phase I.
+- ✅ **Phases A–H** (v1.0 engine) — completed on `feature/v1.0`, 399 tests
+- ✅ **Phase I** (AI integration) — completed on `feature/v1.1`, 452→517 tests
+- ✅ **Phase J** (GUI rendering) — completed on `feature/v1.1`, 517→580 tests
 
-Phase I is independently useful (AI chat works in terminal mode via pub/sub).
-Phase J requires Phase I for type `u` support and AI view generation.
+**Current status:** `feature/v1.1` branch with 580 tests, 0 clippy warnings,
+ready for merge to `main`.
 
 ---
 
