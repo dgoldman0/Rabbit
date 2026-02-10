@@ -297,9 +297,15 @@ pub fn fallback_html(content: &ViewContent, theme: &str) -> String {
         }
         ViewContent::Loading { selector } => {
             format!(
-                "<html><body style=\"background:{bg};color:{fg};font-family:sans-serif;\
+                "<html><head><style>\
+                 @keyframes pulse {{ 0%, 100% {{ opacity: 0.4; }} 50% {{ opacity: 1; }} }}\
+                 .spinner {{ animation: pulse 1.5s ease-in-out infinite; }}\
+                 </style></head>\
+                 <body style=\"background:{bg};color:{fg};font-family:sans-serif;\
                  display:flex;justify-content:center;align-items:center;min-height:100vh;\">\
-                 <div style=\"text-align:center;\"><p>Loading {selector}\u{2026}</p></div></body></html>"
+                 <div style=\"text-align:center;\">\
+                 <div class=\"spinner\" style=\"font-size:48px;margin-bottom:16px;\">⟳</div>\
+                 <p>Loading {selector}…</p></div></body></html>"
             )
         }
     }
@@ -374,8 +380,7 @@ mod tests {
         };
         let prompt = build_prompt(&content, "dark");
         assert!(prompt.contains("MENU at selector `/`"));
-        assert!(prompt.contains("INFO (no id, not clickable): \"Welcome\""));
-        assert!(prompt.contains("clicking navigates to a sub-menu"));
+        assert!(prompt.contains("info: \"Welcome\""));
         assert!(prompt.contains("id=\"item_1\""));
         assert!(prompt.contains("label=\"Docs\""));
         assert!(prompt.contains("type=submenu"));

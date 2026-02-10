@@ -414,12 +414,15 @@ async fn render_content(
     view_gen: &mut Option<ViewGenerator>,
     content: &ViewContent,
     theme: &str,
+    status_signal: &mut Signal<String>,
 ) -> String {
     if let Some(gen) = view_gen.as_mut() {
+        status_signal.set("Generating view with AI…".into());
         match gen.generate(content, theme).await {
             Ok(html) => return html,
             Err(e) => {
                 eprintln!("rabbit-gui: AI render failed ({}), using fallback", e);
+                status_signal.set(format!("AI failed, using fallback: {}", e));
             }
         }
     }
@@ -442,7 +445,7 @@ async fn fetch_and_render(
                 selector: selector.to_string(),
                 items: items.clone(),
             };
-            html_signal.set(render_content(view_gen, &content, theme).await);
+            html_signal.set(render_content(view_gen, &content, theme, status_signal).await);
             actions_signal.set(ActionMap::from_menu(&items));
             title_signal.set(selector.to_string());
             status_signal.set(format!("Viewing {}", selector));
@@ -451,7 +454,7 @@ async fn fetch_and_render(
             match bridge::fetch_selector(conn, selector).await {
                 Ok(body) => {
                     let content = ViewContent::Text { selector: selector.to_string(), body };
-                    html_signal.set(render_content(view_gen, &content, theme).await);
+                    html_signal.set(render_content(view_gen, &content, theme, status_signal).await);
                     actions_signal.set(ActionMap::for_text_view());
                     title_signal.set(selector.to_string());
                     status_signal.set(format!("Viewing {}", selector));
