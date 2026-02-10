@@ -23,6 +23,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 
 [[bin]]
+name = "burrow"
+path = "src/bin/burrow.rs"
+
+[[bin]]
 name = "rabbit"
 path = "src/bin/rabbit.rs"
 

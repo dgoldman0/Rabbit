@@ -5,6 +5,14 @@ federated networks of nodes called *burrows*. Inspired by Gopher's
 human-readable simplicity, layered with modern security (Ed25519 + TLS 1.3),
 async multiplexing, and native publish/subscribe with replay.
 
+Three binaries, one crate:
+
+| Binary | Role |
+|--------|------|
+| `burrow` | Headless server node — serves content, routes messages, runs unattended |
+| `rabbit` | Interactive browser — a full peer with a human at the keyboard |
+| `rabbit-warren` | Multi-burrow test harness — launches several nodes in one process |
+
 ## Quick Start
 
 ```bash
@@ -12,24 +20,28 @@ async multiplexing, and native publish/subscribe with replay.
 cd rabbit_engine
 cargo build --release
 
-# Generate a starter config
-./target/release/rabbit init
+# Generate a starter config and start a headless burrow
+./target/release/burrow init
+./target/release/burrow serve
 
-# Start your burrow
-./target/release/rabbit serve
+# In another terminal, browse it interactively
+./target/release/rabbit browse 127.0.0.1:7443
 
-# In another terminal, start a second burrow that connects to the first
-./target/release/rabbit serve --config config.toml --port 7444 --connect 127.0.0.1:7443
+# Or fetch a specific resource to stdout
+./target/release/rabbit fetch 127.0.0.1:7443 /0/readme
 
-# Or launch a 3-burrow test warren in one command
+# Subscribe to an event stream
+./target/release/rabbit sub 127.0.0.1:7443 /q/chat
+
+# Launch a multi-burrow test warren
 ./target/release/rabbit-warren --count 3 --base-port 7443
 ```
 
 ## CLI Reference
 
-### `rabbit serve`
+### `burrow serve`
 
-Start a burrow and listen for incoming connections.
+Start a headless burrow node and listen for connections.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -39,7 +51,7 @@ Start a burrow and listen for incoming connections.
 | `--storage` / `-s` | from config (`data/`) | Override storage directory |
 | `--connect` | — | Peer address to connect to on startup (repeatable) |
 
-### `rabbit init`
+### `burrow init`
 
 Generate a starter `config.toml` in the current directory.
 
@@ -47,13 +59,45 @@ Generate a starter `config.toml` in the current directory.
 |------|---------|-------------|
 | `--output` / `-o` | `config.toml` | Output file path |
 
-### `rabbit info`
+### `burrow info`
 
 Show the burrow's identity, port, and content summary.
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--config` / `-c` | `config.toml` | Path to config file |
+
+### `rabbit browse`
+
+Browse a burrow interactively. Connects via TLS, runs a full
+handshake (the rabbit is a peer with its own ephemeral identity),
+then displays menus in a text UI with numbered navigation.
+
+| Arg / Flag | Default | Description |
+|------------|---------|-------------|
+| `<addr>` | (required) | Burrow address (e.g. `127.0.0.1:7443`) |
+| `--selector` / `-s` | `/` | Starting menu selector |
+
+Interactive commands: **number** to navigate, **b** to go back, **q** to quit.
+
+### `rabbit fetch`
+
+Fetch a single resource and print its body to stdout.
+
+| Arg | Description |
+|-----|-------------|
+| `<addr>` | Burrow address |
+| `<selector>` | Resource path (e.g. `/0/readme`) |
+
+### `rabbit sub`
+
+Subscribe to an event topic and stream events to stdout.
+
+| Arg / Flag | Description |
+|------------|-------------|
+| `<addr>` | Burrow address |
+| `<topic>` | Topic path (e.g. `/q/chat`) |
+| `--since` | Replay events since sequence number |
 
 ### `rabbit-warren`
 
@@ -103,7 +147,7 @@ path = "/q/chat"
 
 ```
 ┌─────────────────────────────────────────────────┐
-│                CLI / Warren Harness              │  rabbit, rabbit-warren
+│          CLI / Browser / Warren Harness           │  burrow, rabbit, rabbit-warren
 ├─────────────────────────────────────────────────┤
 │                     Burrow                       │  Ties everything together
 ├──────────┬───────────┬───────────┬──────────────┤
@@ -175,7 +219,7 @@ No JSON. No binary serialization. A human can read the traffic on the wire.
 ## Testing
 
 ```bash
-cargo test          # 239 tests
+cargo test          # 247 tests
 cargo clippy        # 0 warnings
 cargo fmt -- --check
 ```
@@ -186,7 +230,8 @@ cargo fmt -- --check
 rabbit_engine/
 ├── src/
 │   ├── bin/
-│   │   ├── rabbit.rs           # CLI binary
+│   │   ├── burrow.rs           # Headless server node
+│   │   ├── rabbit.rs           # Interactive browser
 │   │   └── rabbit_warren.rs    # Warren launcher
 │   ├── burrow.rs               # Top-level assembly
 │   ├── config.rs               # TOML config

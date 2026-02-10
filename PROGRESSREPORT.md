@@ -318,4 +318,43 @@ Tokio features extended: added `net` and `io-util` for TCP and buffered I/O.
 
 ---
 
+## Phase 7: Interactive Client & Binary Rename ✅
+
+**Branch:** feature/interactive-client  
+**Status:** Complete  
+
+### What was built
+
+| Change | Description |
+|--------|-------------|
+| `src/bin/burrow.rs` | **Renamed** from `rabbit.rs`. Headless server node — `burrow serve`, `burrow init`, `burrow info`. All doc comments and clap metadata updated. |
+| `src/bin/rabbit.rs` | **New** interactive browser binary. Three subcommands: `rabbit browse` (interactive TUI), `rabbit fetch` (one-shot), `rabbit sub` (streaming). Ephemeral Ed25519 identity per session. |
+| `Cargo.toml` | Three `[[bin]]` entries: `burrow`, `rabbit`, `rabbit-warren`. |
+| `README.md` | Updated quickstart, CLI reference, architecture diagram, test count. |
+
+### Interactive client features
+
+- **`rabbit browse <addr>`** — Connects to a burrow via TLS, runs full Ed25519 handshake (the rabbit is a peer), sends LIST, parses rabbitmap response, renders a text-mode numbered menu. Navigation: number to select, `b` to go back, `q` to quit. Sub-menus push onto a breadcrumb stack. Type codes drive behaviour: `'1'` → navigate sub-menu, `'0'` → FETCH and display text, `'7'` → prompt for search query, `'q'` → SUBSCRIBE and stream events, `'9'` → skip binary.
+- **`rabbit fetch <addr> <selector>`** — One-shot FETCH. Prints body to stdout. Exit code 1 on error. Ideal for piping.
+- **`rabbit sub <addr> <topic>`** — SUBSCRIBE to a topic. Streams `seq\tbody` lines to stdout. `--since` replays from a sequence number. Runs until Ctrl-C.
+- **Menu rendering** — Box-drawing characters (`┌─`, `│`, `└──`), emoji type indicators (📄 text, 📂 menu, 🔍 search, 📦 binary, ⚡ events). Info lines displayed without numbers. Navigable items numbered sequentially.
+- **Short ID display** — Burrow IDs truncated to `ed25519:XXXXXXXXXXXX…` for readability.
+
+### Test counts
+
+- **New rabbit client tests:** 8 (parse_rabbitmap ×3, render_menu, type_indicator, short_id ×3)
+- **Phase 1-6 tests:** 239 (unchanged)
+- **Total:** 247
+- **Clippy warnings:** 0
+- **cargo fmt:** Clean
+
+### Key design decisions
+
+1. **Ephemeral identity.** The rabbit generates a fresh Ed25519 keypair per session. It's a full peer — the burrow authenticates it — but identity doesn't persist between sessions. Persistent rabbit identity is planned for a future phase.
+2. **No external TUI deps.** The interactive browser uses only `std::io` for input and `println!` for output. No crossterm, ratatui, or curses. Keeps the dependency tree minimal.
+3. **Generic over Tunnel.** `fetch_and_display` and `subscribe_and_stream` accept `&mut T: Tunnel`, so they work with any transport — useful for future testing over memory tunnels.
+4. **Both peers serve.** The naming reflects that even a "rabbit" is a full peer that could serve content. The only difference from a "burrow" is that someone is home.
+
+---
+
 *Last updated: 2026-02-10*
