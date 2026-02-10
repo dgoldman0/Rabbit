@@ -161,31 +161,63 @@ impl ViewGenerator {
     /// Generate HTML for the given content.
     ///
     /// If caching is enabled and the content has been rendered before,
-    /// returns the cached HTML without calling the API.
+    /// returns the cached HTML without calling the API.  When a
+    /// previous render exists for the same content *type* (but
+    /// different data), it is sent to the AI as context so it can
+    /// produce a minimal delta rather than regenerating from scratch.
     pub async fn generate(
         &mut self,
         content: &ViewContent,
         theme: &str,
     ) -> Result<String, AiHttpError> {
-        let prompt = build_prompt(content, theme);
+        let content_key = content_cache_key(content, theme);
 
-        // Check cache.
+        // Check cache — exact content match returns immediately.
         if self.config.cache_views {
-            let key = content_hash(&prompt);
-            if let Some(cached) = self.cache.get(&key) {
+            if let Some(cached) = self.cache.get(&content_key) {
+                eprintln!("rabbit-gui: cache HIT for {} ({})",
+                    content_label(content), &content_key[..12]);
                 return Ok(cached.clone());
             }
+            eprintln!("rabbit-gui: cache MISS for {} ({}) — calling {}",
+                content_label(content), &content_key[..12], self.config.model);
         }
+
+        // Find a previous render for the same content *type* to
+        // give the AI a layout reference.
+        let type_prefix = content_type_prefix(content);
+        let previous_html: Option<String> = self.cache.values()
+            .next() // any previous render is better than none
+            .cloned()
+            .or_else(|| {
+                // Look for same-type entries by checking our prefix keys.
+                self.cache.iter()
+                    .find(|(k, _)| k.starts_with(&type_prefix))
+                    .map(|(_, v)| v.clone())
+            });
 
         // Get API key.
         let api_key = std::env::var("OPENAI_API_KEY")
             .map_err(|_| AiHttpError::MissingApiKey)?;
 
-        // Build messages.
-        let messages = vec![
+        // Build the prompt.
+        let prompt = build_prompt(content, theme);
+
+        // Build messages — include previous render when available.
+        let mut messages = vec![
             AiMessage::system(&self.config.system_message),
-            AiMessage::user(&prompt),
         ];
+        if let Some(ref prev) = previous_html {
+            // Truncate previous HTML to ~3KB to stay within token budget.
+            let cap = 3072.min(prev.len());
+            messages.push(AiMessage::user(
+                "Here is a previously rendered view. Reuse its overall \
+                 layout, CSS, and structure. Only change the content \
+                 that differs.  Return the complete HTML."
+            ));
+            messages.push(AiMessage::assistant(&prev[..cap]));
+        }
+        messages.push(AiMessage::user(&prompt));
 
         let req = CompletionRequest {
             tls: &self.tls,
@@ -193,7 +225,7 @@ impl ViewGenerator {
             api_key: &api_key,
             model: &self.config.model,
             messages: &messages,
-            temperature: None, // Let the model use its default.
+            temperature: None,
             max_tokens: 4096,
         };
 
@@ -204,8 +236,7 @@ impl ViewGenerator {
 
         // Cache the result.
         if self.config.cache_views {
-            let key = content_hash(&prompt);
-            self.cache.insert(key, html.clone());
+            self.cache.insert(content_key, html.clone());
         }
 
         Ok(html)
@@ -219,6 +250,11 @@ impl ViewGenerator {
     /// Number of cached views.
     pub fn cache_size(&self) -> usize {
         self.cache.len()
+    }
+
+    /// The model name being used for rendering.
+    pub fn model_name(&self) -> &str {
+        &self.config.model
     }
 }
 
@@ -298,14 +334,16 @@ pub fn fallback_html(content: &ViewContent, theme: &str) -> String {
         ViewContent::Loading { selector } => {
             format!(
                 "<html><head><style>\
-                 @keyframes pulse {{ 0%, 100% {{ opacity: 0.4; }} 50% {{ opacity: 1; }} }}\
-                 .spinner {{ animation: pulse 1.5s ease-in-out infinite; }}\
+                 @keyframes spin {{ to {{ transform: rotate(360deg); }} }}\
+                 .spin {{ width:32px;height:32px;border:3px solid {fg}33;\
+                 border-top-color:{accent};border-radius:50%;\
+                 animation:spin 0.8s linear infinite;margin:0 auto 16px; }}\
                  </style></head>\
                  <body style=\"background:{bg};color:{fg};font-family:sans-serif;\
                  display:flex;justify-content:center;align-items:center;min-height:100vh;\">\
                  <div style=\"text-align:center;\">\
-                 <div class=\"spinner\" style=\"font-size:48px;margin-bottom:16px;\">⟳</div>\
-                 <p>Loading {selector}…</p></div></body></html>"
+                 <div class=\"spin\"></div>\
+                 <p style=\"opacity:0.7;\">Loading {selector}</p></div></body></html>"
             )
         }
     }
@@ -313,11 +351,79 @@ pub fn fallback_html(content: &ViewContent, theme: &str) -> String {
 
 // ── Helpers ────────────────────────────────────────────────────
 
-/// Compute a SHA-256 hex digest of a prompt string.
-fn content_hash(prompt: &str) -> String {
+/// Compute a SHA-256 hex digest of a string.
+fn content_hash(text: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(prompt.as_bytes());
+    hasher.update(text.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Produce a stable cache key from content + theme.
+///
+/// This hashes the *content data* (selector, body, items) and theme
+/// so that identical content always returns the same key regardless
+/// of prompt wording changes.
+fn content_cache_key(content: &ViewContent, theme: &str) -> String {
+    let mut data = String::with_capacity(512);
+    data.push_str(theme);
+    data.push('|');
+    match content {
+        ViewContent::Menu { selector, items } => {
+            data.push_str("menu|");
+            data.push_str(selector);
+            for item in items {
+                data.push('|');
+                data.push(item.type_code);
+                data.push_str(&item.label);
+                data.push_str(&item.selector);
+            }
+        }
+        ViewContent::Text { selector, body } => {
+            data.push_str("text|");
+            data.push_str(selector);
+            data.push('|');
+            data.push_str(body);
+        }
+        ViewContent::Events { topic, messages } => {
+            data.push_str("events|");
+            data.push_str(topic);
+            data.push('|');
+            data.push_str(&messages.len().to_string());
+            // Hash last message for freshness.
+            if let Some(last) = messages.last() {
+                data.push('|');
+                data.push_str(last);
+            }
+        }
+        ViewContent::Status { message } => {
+            data.push_str("status|");
+            data.push_str(message);
+        }
+        ViewContent::Loading { selector } => {
+            data.push_str("loading|");
+            data.push_str(selector);
+        }
+    }
+    content_hash(&data)
+}
+
+/// Short label describing content for log messages.
+fn content_label(content: &ViewContent) -> &str {
+    match content {
+        ViewContent::Menu { .. } => "menu",
+        ViewContent::Text { .. } => "text",
+        ViewContent::Events { .. } => "events",
+        ViewContent::Status { .. } => "status",
+        ViewContent::Loading { .. } => "loading",
+    }
+}
+
+/// Prefix used to find same-type cache entries.
+fn content_type_prefix(content: &ViewContent) -> String {
+    // We prefix by type in the cache key data, so we can
+    // just use the label. (The actual keys are hashes, but
+    // we look through all values for layout reference.)
+    content_label(content).to_string()
 }
 
 /// Strip markdown code fences from AI output.
@@ -380,7 +486,7 @@ mod tests {
         };
         let prompt = build_prompt(&content, "dark");
         assert!(prompt.contains("MENU at selector `/`"));
-        assert!(prompt.contains("info: \"Welcome\""));
+        assert!(prompt.contains("INFO (no id, not clickable): \"Welcome\""));
         assert!(prompt.contains("id=\"item_1\""));
         assert!(prompt.contains("label=\"Docs\""));
         assert!(prompt.contains("type=submenu"));

@@ -417,7 +417,8 @@ async fn render_content(
     status_signal: &mut Signal<String>,
 ) -> String {
     if let Some(gen) = view_gen.as_mut() {
-        status_signal.set("Generating view with AI…".into());
+        let model = gen.model_name().to_string();
+        status_signal.set(format!("{model} rendering\u{2026}"));
         match gen.generate(content, theme).await {
             Ok(html) => return html,
             Err(e) => {
