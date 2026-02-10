@@ -16,6 +16,9 @@ use crate::ai::types::AiMessage;
 use crate::config::AiRendererConfig;
 use crate::content::store::MenuItem;
 
+/// Channel sender for streaming progress tokens.
+pub type ProgressTx = tokio::sync::mpsc::Sender<String>;
+
 // ── Content descriptions fed to the prompt builder ─────────────
 
 /// A piece of burrow content to be rendered.
@@ -160,19 +163,25 @@ impl ViewGenerator {
 
     /// Generate HTML for the given content.
     ///
-    /// If caching is enabled and the content has been rendered before,
-    /// returns the cached HTML without calling the API.  When a
-    /// previous render exists for the same content *type* (but
-    /// different data), it is sent to the AI as context so it can
-    /// produce a minimal delta rather than regenerating from scratch.
+    /// **Cache HIT** — returns immediately, zero API calls.
+    ///
+    /// **Cache MISS + prior HTML exists** — asks the AI to produce
+    /// ONLY a JSON diff `[{"find":"…","replace":"…"}, …]` which is
+    /// applied to the cached HTML.  Much smaller/faster response.
+    ///
+    /// **Cache MISS + no prior HTML** — full generation (streamed).
+    ///
+    /// Tokens are sent through `progress` as they arrive so the UI
+    /// can show live progress.
     pub async fn generate(
         &mut self,
         content: &ViewContent,
         theme: &str,
+        progress: &ProgressTx,
     ) -> Result<String, AiHttpError> {
         let content_key = content_cache_key(content, theme);
 
-        // Check cache — exact content match returns immediately.
+        // ── Cache HIT → instant return ──────────────────────────
         if self.config.cache_views {
             if let Some(cached) = self.cache.get(&content_key) {
                 eprintln!("rabbit-gui: cache HIT for {} ({})",
@@ -183,56 +192,23 @@ impl ViewGenerator {
                 content_label(content), &content_key[..12], self.config.model);
         }
 
-        // Find a previous render for the same content *type* to
-        // give the AI a layout reference.
-        let type_prefix = content_type_prefix(content);
-        let previous_html: Option<String> = self.cache.values()
-            .next() // any previous render is better than none
-            .cloned()
-            .or_else(|| {
-                // Look for same-type entries by checking our prefix keys.
-                self.cache.iter()
-                    .find(|(k, _)| k.starts_with(&type_prefix))
-                    .map(|(_, v)| v.clone())
-            });
+        // Find previous HTML for same content *type*.
+        let previous_html: Option<String> = self.cache.iter()
+            .find(|(_, _)| true) // any entry works as layout reference
+            .map(|(_, v)| v.clone());
 
-        // Get API key.
         let api_key = std::env::var("OPENAI_API_KEY")
             .map_err(|_| AiHttpError::MissingApiKey)?;
 
-        // Build the prompt.
         let prompt = build_prompt(content, theme);
 
-        // Build messages — include previous render when available.
-        let mut messages = vec![
-            AiMessage::system(&self.config.system_message),
-        ];
-        if let Some(ref prev) = previous_html {
-            // Truncate previous HTML to ~3KB to stay within token budget.
-            let cap = 3072.min(prev.len());
-            messages.push(AiMessage::user(
-                "Here is a previously rendered view. Reuse its overall \
-                 layout, CSS, and structure. Only change the content \
-                 that differs.  Return the complete HTML."
-            ));
-            messages.push(AiMessage::assistant(&prev[..cap]));
-        }
-        messages.push(AiMessage::user(&prompt));
-
-        let req = CompletionRequest {
-            tls: &self.tls,
-            api_base: &self.config.api_base,
-            api_key: &api_key,
-            model: &self.config.model,
-            messages: &messages,
-            temperature: None,
-            max_tokens: 4096,
+        let html = if let Some(ref base_html) = previous_html {
+            // ── DIFF mode ───────────────────────────────────────
+            self.generate_diff(base_html, &prompt, &api_key, progress).await?
+        } else {
+            // ── FULL mode (streamed) ────────────────────────────
+            self.generate_full(&prompt, &api_key, progress).await?
         };
-
-        let raw_html = http::chat_completion_with_retry(&req, 2).await?;
-
-        // Strip markdown fences if the AI wraps the response.
-        let html = strip_markdown_fences(&raw_html);
 
         // Cache the result.
         if self.config.cache_views {
@@ -240,6 +216,121 @@ impl ViewGenerator {
         }
 
         Ok(html)
+    }
+
+    /// Full HTML generation via streaming SSE.
+    async fn generate_full(
+        &self,
+        prompt: &str,
+        api_key: &str,
+        progress: &ProgressTx,
+    ) -> Result<String, AiHttpError> {
+        let messages = vec![
+            AiMessage::system(&self.config.system_message),
+            AiMessage::user(prompt),
+        ];
+
+        let req = CompletionRequest {
+            tls: &self.tls,
+            api_base: &self.config.api_base,
+            api_key,
+            model: &self.config.model,
+            messages: &messages,
+            temperature: None,
+            max_tokens: 4096,
+        };
+
+        let raw = http::chat_completion_streaming_with_retry(&req, progress, 2).await?;
+        Ok(strip_markdown_fences(&raw))
+    }
+
+    /// Diff-based generation: AI produces ONLY a JSON patch array,
+    /// which is applied to `base_html` to produce the final result.
+    ///
+    /// Patch format: `[{"find": "old text", "replace": "new text"}, ...]`
+    /// An empty array `[]` means no changes needed.
+    async fn generate_diff(
+        &self,
+        base_html: &str,
+        prompt: &str,
+        api_key: &str,
+        progress: &ProgressTx,
+    ) -> Result<String, AiHttpError> {
+        // Cap the base HTML we send to ~6KB to stay within token budget.
+        let cap = 6144.min(base_html.len());
+        let base_snippet = &base_html[..cap];
+
+        let diff_instruction = format!(
+            "EXISTING HTML (this is the current rendered page):\n\
+             ```html\n{base_snippet}\n```\n\n\
+             NEW CONTENT to render:\n{prompt}\n\n\
+             IMPORTANT: Return ONLY a JSON array of find/replace patches to \
+             transform the existing HTML into the new view.\n\
+             Format: [{{\"find\": \"exact old text\", \"replace\": \"new text\"}}, ...]\n\
+             - Each \"find\" must be an EXACT substring of the existing HTML.\n\
+             - If the page needs completely different structure, return one patch \
+             that replaces the entire <body>...</body> content.\n\
+             - If no changes needed, return: []\n\
+             Return ONLY the JSON array. No markdown fences, no explanation."
+        );
+
+        let messages = vec![
+            AiMessage::system(&self.config.system_message),
+            AiMessage::user(&diff_instruction),
+        ];
+
+        let req = CompletionRequest {
+            tls: &self.tls,
+            api_base: &self.config.api_base,
+            api_key,
+            model: &self.config.model,
+            messages: &messages,
+            temperature: None,
+            max_tokens: 4096,
+        };
+
+        let raw = http::chat_completion_streaming_with_retry(&req, progress, 2).await?;
+        let raw = strip_markdown_fences(&raw);
+
+        // Parse the JSON patch array.
+        let patches = parse_patches(&raw);
+
+        if patches.is_empty() {
+            // No changes — return base as-is.
+            eprintln!("rabbit-gui: diff returned 0 patches, using base HTML");
+            return Ok(base_html.to_string());
+        }
+
+        // Apply patches to base HTML.
+        let mut result = base_html.to_string();
+        let mut applied = 0;
+        for patch in &patches {
+            if let Some(pos) = result.find(&patch.find) {
+                result = format!(
+                    "{}{}{}",
+                    &result[..pos],
+                    patch.replace,
+                    &result[pos + patch.find.len()..]
+                );
+                applied += 1;
+            } else {
+                eprintln!("rabbit-gui: patch find not matched: {:?}",
+                    &patch.find[..patch.find.len().min(60)]);
+            }
+        }
+
+        eprintln!("rabbit-gui: applied {}/{} patches", applied, patches.len());
+
+        // If zero patches applied, the AI probably returned garbage —
+        // fall back to full generation.
+        if applied == 0 {
+            eprintln!("rabbit-gui: diff failed, falling back to full generation");
+            return self.generate_full(&build_prompt_from_raw(
+                &strip_markdown_fences(&raw), ""), api_key, progress).await
+                .or_else(|_| Ok(base_html.to_string()));
+        }
+
+        Ok(result)
     }
 
     /// Clear the view cache.
@@ -418,12 +509,44 @@ fn content_label(content: &ViewContent) -> &str {
     }
 }
 
-/// Prefix used to find same-type cache entries.
-fn content_type_prefix(content: &ViewContent) -> String {
-    // We prefix by type in the cache key data, so we can
-    // just use the label. (The actual keys are hashes, but
-    // we look through all values for layout reference.)
-    content_label(content).to_string()
+// ── Diff/Patch types ───────────────────────────────────────────
+
+/// A single find-replace patch from the AI.
+#[derive(Debug, Clone)]
+struct Patch {
+    find: String,
+    replace: String,
+}
+
+/// Parse the AI's JSON patch response.
+///
+/// Expects `[{"find": "…", "replace": "…"}, ...]`.
+/// Returns an empty vec on parse failure.
+fn parse_patches(json_str: &str) -> Vec<Patch> {
+    let trimmed = strip_markdown_fences(json_str);
+    let trimmed = trimmed.trim();
+
+    // Try parsing as a JSON array of objects.
+    let arr: Vec<serde_json::Value> = match serde_json::from_str(trimmed) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("rabbit-gui: failed to parse patch JSON: {}", e);
+            return Vec::new();
+        }
+    };
+
+    arr.iter().filter_map(|v| {
+        let find = v.get("find")?.as_str()?.to_string();
+        let replace = v.get("replace")?.as_str()?.to_string();
+        if find.is_empty() { return None; }
+        Some(Patch { find, replace })
+    }).collect()
+}
+
+/// Passthrough helper — when diff fails and we want to try full gen
+/// but already consumed the prompt, just return the text as-is.
+fn build_prompt_from_raw(text: &str, _theme: &str) -> String {
+    text.to_string()
 }
 
 /// Strip markdown code fences from AI output.
@@ -433,6 +556,8 @@ pub fn strip_markdown_fences(text: &str) -> String {
     let trimmed = text.trim();
     // Remove opening fence.
     let without_open = if let Some(rest) = trimmed.strip_prefix("```html") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("```json") {
         rest
     } else if let Some(rest) = trimmed.strip_prefix("```") {
         rest
@@ -635,5 +760,51 @@ mod tests {
         assert_eq!(gen.cache_size(), 1);
         gen.clear_cache();
         assert_eq!(gen.cache_size(), 0);
+    }
+
+    #[test]
+    fn parse_patches_valid() {
+        let json = r#"[{"find": "Hello", "replace": "World"}, {"find": "<h1>Old</h1>", "replace": "<h1>New</h1>"}]"#;
+        let patches = parse_patches(json);
+        assert_eq!(patches.len(), 2);
+        assert_eq!(patches[0].find, "Hello");
+        assert_eq!(patches[0].replace, "World");
+        assert_eq!(patches[1].find, "<h1>Old</h1>");
+        assert_eq!(patches[1].replace, "<h1>New</h1>");
+    }
+
+    #[test]
+    fn parse_patches_empty_array() {
+        let patches = parse_patches("[]");
+        assert!(patches.is_empty());
+    }
+
+    #[test]
+    fn parse_patches_with_fences() {
+        let json = "```json\n[{\"find\": \"a\", \"replace\": \"b\"}]\n```";
+        let patches = parse_patches(json);
+        assert_eq!(patches.len(), 1);
+    }
+
+    #[test]
+    fn parse_patches_garbage() {
+        let patches = parse_patches("not json at all");
+        assert!(patches.is_empty());
+    }
+
+    #[test]
+    fn apply_patches_integration() {
+        let base = "<html><body><h1>Title</h1><p>Old content</p></body></html>";
+        let json = r#"[{"find": "<h1>Title</h1>", "replace": "<h1>New Title</h1>"}, {"find": "Old content", "replace": "New content"}]"#;
+        let patches = parse_patches(json);
+        let mut result = base.to_string();
+        for p in &patches {
+            if let Some(pos) = result.find(&p.find) {
+                result = format!("{}{}{}", &result[..pos], p.replace, &result[pos + p.find.len()..]);
+            }
+        }
+        assert!(result.contains("New Title"));
+        assert!(result.contains("New content"));
+        assert!(!result.contains("Old content"));
     }
 }

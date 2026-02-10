@@ -410,6 +410,9 @@ fn App() -> Element {
 // ── Bridge helpers ─────────────────────────────────────────────
 
 /// Try AI rendering first; fall back to static HTML on failure.
+///
+/// Streams tokens from the API and updates the status bar live as
+/// each chunk arrives.
 async fn render_content(
     view_gen: &mut Option<ViewGenerator>,
     content: &ViewContent,
@@ -418,9 +421,46 @@ async fn render_content(
 ) -> String {
     if let Some(gen) = view_gen.as_mut() {
         let model = gen.model_name().to_string();
-        status_signal.set(format!("{model} rendering\u{2026}"));
-        match gen.generate(content, theme).await {
-            Ok(html) => return html,
+        let has_cache = gen.cache_size() > 0;
+        let mode = if has_cache { "diff" } else { "full" };
+        status_signal.set(format!("{model} \u{25B8} {mode} 0 tokens"));
+
+        // Create a channel for streaming progress.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
+
+        // Spawn the generation — we'll poll it alongside the progress
+        // channel so we can update the status bar in real time.
+        let gen_ptr = gen as *mut ViewGenerator;
+        // SAFETY: we await the future in the same scope, gen outlives it.
+        let gen_ref = unsafe { &mut *gen_ptr };
+        let mut gen_fut = std::pin::pin!(
+            gen_ref.generate(content, theme, &tx)
+        );
+
+        let mut token_count: usize = 0;
+        let result = loop {
+            tokio::select! {
+                biased;
+                Some(tok) = rx.recv() => {
+                    // Count whitespace-delimited tokens approximately.
+                    token_count += tok.split_whitespace().count().max(1);
+                    status_signal.set(format!("{model} \u{25B8} {mode} {token_count} tokens"));
+                }
+                res = &mut gen_fut => {
+                    // Drain remaining tokens from channel.
+                    while let Ok(tok) = rx.try_recv() {
+                        token_count += tok.split_whitespace().count().max(1);
+                    }
+                    break res;
+                }
+            }
+        };
+
+        match result {
+            Ok(html) => {
+                status_signal.set(format!("{model} \u{25B8} done ({token_count} tokens)"));
+                return html;
+            }
             Err(e) => {
                 eprintln!("rabbit-gui: AI render failed ({}), using fallback", e);
                 status_signal.set(format!("AI failed, using fallback: {}", e));

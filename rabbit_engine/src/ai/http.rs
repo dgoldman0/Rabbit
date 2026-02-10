@@ -242,6 +242,183 @@ pub async fn chat_completion_with_retry(
     unreachable!()
 }
 
+// ── Streaming SSE completion ───────────────────────────────────
+
+/// Parsed SSE delta from a streaming completion.
+#[derive(Debug, Deserialize)]
+struct StreamChoice {
+    delta: StreamDelta,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamDelta {
+    content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamChunk {
+    choices: Vec<StreamChoice>,
+}
+
+/// Call a chat-completion endpoint with `stream: true` and send each
+/// content token through the provided `tx` channel as it arrives.
+///
+/// Returns the fully accumulated response text.
+pub async fn chat_completion_streaming(
+    req: &CompletionRequest<'_>,
+    tx: &tokio::sync::mpsc::Sender<String>,
+) -> Result<String, AiHttpError> {
+    let api_base = req.api_base;
+    let api_key = req.api_key;
+    let model = req.model;
+    let messages = req.messages;
+    let max_tokens = req.max_tokens;
+    let tls = req.tls;
+
+    // Parse the base URL.
+    let base = api_base.trim_end_matches('/');
+    let without_scheme = base
+        .strip_prefix("https://")
+        .ok_or_else(|| AiHttpError::InvalidUrl(api_base.to_string()))?;
+    let (host_port, path_prefix) = match without_scheme.find('/') {
+        Some(i) => (&without_scheme[..i], &without_scheme[i..]),
+        None => (without_scheme, ""),
+    };
+    let (host, port) = match host_port.find(':') {
+        Some(i) => (&host_port[..i], host_port[i + 1..].parse::<u16>().unwrap_or(443)),
+        None => (host_port, 443u16),
+    };
+    let path = format!("{}/chat/completions", path_prefix);
+
+    // Build JSON body with stream: true.
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "max_completion_tokens": max_tokens,
+        "stream": true,
+    });
+    if let Some(t) = req.temperature {
+        body["temperature"] = serde_json::json!(t);
+    }
+    let body_bytes = serde_json::to_vec(&body)?;
+
+    // TLS connect.
+    let connector = TlsConnector::from(Arc::clone(tls));
+    let tcp = TcpStream::connect((host, port)).await?;
+    let server_name = ServerName::try_from(host.to_string())
+        .map_err(|_| AiHttpError::InvalidUrl(host.to_string()))?;
+    let mut stream = connector.connect(server_name, tcp).await?;
+
+    // Write HTTP/1.1 request.
+    let request = format!(
+        "POST {} HTTP/1.1\r\n\
+         Host: {}\r\n\
+         Authorization: Bearer {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Accept: text/event-stream\r\n\
+         Connection: close\r\n\
+         \r\n",
+        path, host_port, api_key, body_bytes.len()
+    );
+    stream.write_all(request.as_bytes()).await?;
+    stream.write_all(&body_bytes).await?;
+
+    // Read headers first to check status.
+    let mut header_buf = Vec::with_capacity(4096);
+    let mut found_end = false;
+    let mut tmp = [0u8; 1];
+    while !found_end {
+        let n = stream.read(&mut tmp).await?;
+        if n == 0 { break; }
+        header_buf.push(tmp[0]);
+        let len = header_buf.len();
+        if len >= 4 && &header_buf[len-4..] == b"\r\n\r\n" {
+            found_end = true;
+        }
+    }
+    let header_str = String::from_utf8_lossy(&header_buf);
+    let status: u16 = header_str
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    if status != 200 {
+        // Read remaining body for error message.
+        let mut err_buf = Vec::new();
+        let _ = stream.read_to_end(&mut err_buf).await;
+        let err_body = String::from_utf8_lossy(&err_buf);
+        return Err(AiHttpError::Http { status, body: err_body.to_string() });
+    }
+
+    // Read SSE stream: lines of "data: {json}" or "data: [DONE]".
+    let mut accumulated = String::new();
+    let mut line_buf = String::new();
+    let mut byte = [0u8; 1];
+
+    loop {
+        match stream.read(&mut byte).await {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                let ch = byte[0] as char;
+                if ch == '\n' {
+                    let line = line_buf.trim().to_string();
+                    line_buf.clear();
+
+                    if line == "data: [DONE]" {
+                        break;
+                    }
+                    if let Some(json_str) = line.strip_prefix("data: ") {
+                        if let Ok(chunk) = serde_json::from_str::<StreamChunk>(json_str) {
+                            for choice in &chunk.choices {
+                                if let Some(ref content) = choice.delta.content {
+                                    accumulated.push_str(content);
+                                    // Send token to progress channel (non-blocking).
+                                    let _ = tx.try_send(content.clone());
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    line_buf.push(ch);
+                }
+            }
+            Err(e) => return Err(AiHttpError::Io(e)),
+        }
+    }
+
+    if accumulated.is_empty() {
+        return Err(AiHttpError::EmptyResponse);
+    }
+
+    Ok(accumulated)
+}
+
+/// Streaming completion with retry logic.
+pub async fn chat_completion_streaming_with_retry(
+    req: &CompletionRequest<'_>,
+    tx: &tokio::sync::mpsc::Sender<String>,
+    max_retries: u32,
+) -> Result<String, AiHttpError> {
+    let mut delay = std::time::Duration::from_secs(1);
+    for attempt in 0..=max_retries {
+        match chat_completion_streaming(req, tx).await {
+            Ok(reply) => return Ok(reply),
+            Err(AiHttpError::Http { status, .. }) if (status == 429 || status >= 500) && attempt < max_retries => {
+                tracing::warn!("AI HTTP {status}, retry {}/{max_retries} in {:?}", attempt + 1, delay);
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
