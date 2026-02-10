@@ -26,6 +26,25 @@ pub struct Event {
     pub body: String,
 }
 
+/// Quality-of-service level for event delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QoS {
+    /// Best-effort: drop events if the subscriber is slow.
+    Stream,
+    /// Guaranteed: queue events if the subscriber is slow (default).
+    Event,
+}
+
+impl QoS {
+    /// Parse a QoS level from a header value.
+    pub fn from_header(value: &str) -> Self {
+        match value.to_lowercase().as_str() {
+            "stream" => QoS::Stream,
+            _ => QoS::Event,
+        }
+    }
+}
+
 /// Tracks a single subscriber's position in a topic.
 #[derive(Debug, Clone)]
 pub struct SubscriberState {
@@ -35,6 +54,8 @@ pub struct SubscriberState {
     pub lane: String,
     /// Last sequence number delivered to this subscriber.
     pub last_delivered_seq: u64,
+    /// Quality-of-service level for this subscription.
+    pub qos: QoS,
 }
 
 /// State for a single topic.
@@ -104,7 +125,19 @@ impl EventEngine {
         lane: &str,
         since_seq: Option<u64>,
     ) -> Vec<Frame> {
-        let mut topics = self.inner.lock().unwrap();
+        self.subscribe_with_qos(topic, peer_id, lane, since_seq, QoS::Event)
+    }
+
+    /// Subscribe a peer to a topic with a specific QoS level.
+    pub fn subscribe_with_qos(
+        &self,
+        topic: &str,
+        peer_id: &str,
+        lane: &str,
+        since_seq: Option<u64>,
+        qos: QoS,
+    ) -> Vec<Frame> {
+        let mut topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let state = topics
             .entry(topic.to_string())
             .or_insert_with(TopicState::new);
@@ -115,6 +148,7 @@ impl EventEngine {
                 peer_id: peer_id.to_string(),
                 lane: lane.to_string(),
                 last_delivered_seq: since_seq.unwrap_or(0),
+                qos,
             },
         );
 
@@ -132,7 +166,7 @@ impl EventEngine {
     ///
     /// Returns `true` if the peer was subscribed, `false` otherwise.
     pub fn unsubscribe(&self, topic: &str, peer_id: &str) -> bool {
-        let mut topics = self.inner.lock().unwrap();
+        let mut topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(state) = topics.get_mut(topic) {
             state.subscribers.remove(peer_id).is_some()
         } else {
@@ -149,7 +183,7 @@ impl EventEngine {
     ///
     /// Returns `(targeted_broadcast_frames, event)`.
     pub fn publish(&self, topic: &str, body: &str) -> (Vec<(String, Frame)>, Event) {
-        let mut topics = self.inner.lock().unwrap();
+        let mut topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let state = topics
             .entry(topic.to_string())
             .or_insert_with(TopicState::new);
@@ -183,7 +217,7 @@ impl EventEngine {
     /// Returns EVENT frames for events with seq > since_seq.
     /// Uses the given `lane` in frame headers.
     pub fn replay(&self, topic: &str, since_seq: u64, lane: &str) -> Vec<Frame> {
-        let topics = self.inner.lock().unwrap();
+        let topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match topics.get(topic) {
             Some(state) => state
                 .events
@@ -197,25 +231,25 @@ impl EventEngine {
 
     /// Return the number of events logged for a topic.
     pub fn event_count(&self, topic: &str) -> usize {
-        let topics = self.inner.lock().unwrap();
+        let topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         topics.get(topic).map(|t| t.events.len()).unwrap_or(0)
     }
 
     /// Return the number of subscribers for a topic.
     pub fn subscriber_count(&self, topic: &str) -> usize {
-        let topics = self.inner.lock().unwrap();
+        let topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         topics.get(topic).map(|t| t.subscribers.len()).unwrap_or(0)
     }
 
     /// Check whether a topic exists.
     pub fn has_topic(&self, topic: &str) -> bool {
-        let topics = self.inner.lock().unwrap();
+        let topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         topics.contains_key(topic)
     }
 
     /// Return all topic paths (sorted).
     pub fn topics(&self) -> Vec<String> {
-        let topics = self.inner.lock().unwrap();
+        let topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut keys: Vec<String> = topics.keys().cloned().collect();
         keys.sort();
         keys
@@ -223,7 +257,7 @@ impl EventEngine {
 
     /// Return the raw events for a topic (for continuity persistence).
     pub fn events(&self, topic: &str) -> Vec<Event> {
-        let topics = self.inner.lock().unwrap();
+        let topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         topics
             .get(topic)
             .map(|t| t.events.clone())
@@ -235,7 +269,7 @@ impl EventEngine {
     /// Sets the topic's event log and next_seq.  Any existing events
     /// are replaced.
     pub fn load_events(&self, topic: &str, events: Vec<Event>) {
-        let mut topics = self.inner.lock().unwrap();
+        let mut topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let state = topics
             .entry(topic.to_string())
             .or_insert_with(TopicState::new);
@@ -246,7 +280,7 @@ impl EventEngine {
 
     /// Prune events for a topic, keeping only the last `keep` events.
     pub fn prune(&self, topic: &str, keep: usize) {
-        let mut topics = self.inner.lock().unwrap();
+        let mut topics = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(state) = topics.get_mut(topic) {
             if state.events.len() > keep {
                 let drain_count = state.events.len() - keep;

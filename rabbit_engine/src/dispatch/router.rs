@@ -11,7 +11,7 @@ use crate::content::handler as content_handler;
 use crate::content::search::SearchIndex;
 use crate::content::store::{ContentEntry, ContentStore};
 use crate::events::continuity::ContinuityStore;
-use crate::events::engine::EventEngine;
+use crate::events::engine::{EventEngine, QoS};
 use crate::events::handler as event_handler;
 use crate::protocol::error::ProtocolError;
 use crate::protocol::frame::Frame;
@@ -130,7 +130,10 @@ impl<'a> Dispatcher<'a> {
     /// permitted (backward-compatible).
     fn check_cap(&self, peer_id: &str, cap: Capability) -> bool {
         match &self.capabilities {
-            Some(mgr) => mgr.lock().unwrap().check(peer_id, cap),
+            Some(mgr) => mgr
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .check(peer_id, cap),
             None => true,
         }
     }
@@ -189,7 +192,13 @@ impl<'a> Dispatcher<'a> {
                 let since_seq = frame.header("Since").and_then(|s| s.parse::<u64>().ok());
                 let lane = frame.header("Lane").unwrap_or("0").to_string();
                 let txn = frame.header("Txn").unwrap_or("").to_string();
-                let result = self.events.subscribe(topic, peer_id, &lane, since_seq);
+                let qos = frame
+                    .header("QoS")
+                    .map(QoS::from_header)
+                    .unwrap_or(QoS::Event);
+                let result = self
+                    .events
+                    .subscribe_with_qos(topic, peer_id, &lane, since_seq, qos);
                 let mut response = Frame::new("201 SUBSCRIBED");
                 if !lane.is_empty() {
                     response.set_header("Lane", &lane);
@@ -326,7 +335,9 @@ impl<'a> Dispatcher<'a> {
 
                 // Grant the capability to the target.
                 if let Some(mgr) = self.capabilities {
-                    mgr.lock().unwrap().grant(&target, cap, ttl);
+                    mgr.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .grant(&target, cap, ttl);
                 }
 
                 let mut response = Frame::new("200 OK");

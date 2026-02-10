@@ -20,10 +20,14 @@ use std::time::Duration;
 
 use tracing::{debug, info, instrument, warn};
 
+use std::sync::atomic::AtomicU32;
+
 use crate::config::Config;
 use crate::content::loader::load_content;
 use crate::content::search::SearchIndex;
 use crate::content::store::ContentStore;
+use crate::dispatch::idem_cache::IdemCache;
+use crate::dispatch::rate_limiter::RateLimiter;
 use crate::dispatch::router::{DispatchResult, Dispatcher};
 use crate::events::continuity::ContinuityStore;
 use crate::events::engine::EventEngine;
@@ -84,6 +88,16 @@ pub struct Burrow {
     pub routing: RoutingTable,
     /// Saved session states for resumption.
     pub saved_sessions: std::sync::Mutex<Vec<crate::session::SavedSessionState>>,
+    /// Per-peer frame rate limiter.
+    pub rate_limiter: RateLimiter,
+    /// Idempotency token cache.
+    pub idem_cache: IdemCache,
+    /// Maximum concurrent tunnels (0 = unlimited).
+    pub max_connections: u32,
+    /// Maximum concurrent tunnels from the same peer (0 = unlimited).
+    pub max_per_peer: u32,
+    /// Current number of active tunnels.
+    pub active_connections: AtomicU32,
 }
 
 impl Burrow {
@@ -180,6 +194,14 @@ impl Burrow {
             offer_interval_secs: config.network.offer_interval_secs,
             routing: RoutingTable::new(),
             saved_sessions: std::sync::Mutex::new(Vec::new()),
+            rate_limiter: RateLimiter::new(
+                config.network.rate_limit_fps,
+                config.network.publish_rate_limit_fps,
+            ),
+            idem_cache: IdemCache::new(config.network.idem_ttl_secs),
+            max_connections: config.network.max_connections,
+            max_per_peer: config.network.max_per_peer,
+            active_connections: AtomicU32::new(0),
         })
     }
 
@@ -209,6 +231,11 @@ impl Burrow {
             offer_interval_secs: 60,
             routing: RoutingTable::new(),
             saved_sessions: std::sync::Mutex::new(Vec::new()),
+            rate_limiter: RateLimiter::new(0, 0),
+            idem_cache: IdemCache::new(60),
+            max_connections: 0,
+            max_per_peer: 0,
+            active_connections: AtomicU32::new(0),
         }
     }
 
@@ -226,7 +253,10 @@ impl Burrow {
     pub fn save_trust(&self) -> Result<(), ProtocolError> {
         let storage = self.base_dir.join("data");
         let trust_path = storage.join("trust.tsv");
-        self.trust.lock().unwrap().save(&trust_path)
+        self.trust
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .save(&trust_path)
     }
 
     /// Create a [`Dispatcher`] that borrows this burrow's content,
@@ -255,6 +285,18 @@ impl Burrow {
     /// Returns the authenticated peer ID (or "anonymous").
     #[instrument(skip(self, tunnel), fields(burrow = %self.name))]
     pub async fn handle_tunnel<T: Tunnel>(&self, tunnel: &mut T) -> Result<String, ProtocolError> {
+        // ── Connection limit enforcement (H3) ─────────────────
+        let current = self.active_connections.fetch_add(1, Ordering::Relaxed);
+        if self.max_connections > 0 && current >= self.max_connections {
+            self.active_connections.fetch_sub(1, Ordering::Relaxed);
+            let mut err = Frame::new("503 BUSY");
+            err.set_body("connection limit reached");
+            let _ = tunnel.send_frame(&err).await;
+            return Err(ProtocolError::InternalError(
+                "connection limit reached".into(),
+            ));
+        }
+
         // ── Handshake (with timeout) ───────────────────────────
         let handshake_timeout = Duration::from_secs(self.handshake_timeout_secs);
         let peer_id =
@@ -325,6 +367,20 @@ impl Burrow {
                             )
                             .into();
                             tunnel.send_frame(&err_frame).await?;
+                            continue;
+                        }
+                    }
+
+                    // ── Rate limiting (H2) ─────────────────────
+                    if self.rate_limiter.is_enabled() {
+                        let is_publish = frame.verb == "PUBLISH";
+                        if !self.rate_limiter.check(&peer_id, is_publish) {
+                            let mut err = Frame::new("429 FLOW-LIMIT");
+                            err.set_body("rate limit exceeded");
+                            if let Some(lane) = frame.header("Lane") {
+                                err.set_header("Lane", lane);
+                            }
+                            tunnel.send_frame(&err).await?;
                             continue;
                         }
                     }
@@ -400,8 +456,44 @@ impl Burrow {
                         }
                     }
 
-                    // ── Normal dispatch ────────────────────────
-                    let result: DispatchResult = dispatcher.dispatch(&frame, &peer_id).await;
+                    // ── Idempotency check (H4) ─────────────────
+                    if let Some(idem_token) = frame.header("Idem") {
+                        if let Some(cached) = self.idem_cache.get(idem_token) {
+                            tunnel.send_frame(&cached).await?;
+                            continue;
+                        }
+                    }
+
+                    // ── Timeout-enforced dispatch (H5) ────────────
+                    let timeout_secs: Option<u64> = frame
+                        .header("Timeout")
+                        .and_then(|s| s.parse().ok());
+
+                    let result: DispatchResult = if let Some(t) = timeout_secs {
+                        match tokio::time::timeout(
+                            Duration::from_secs(t),
+                            dispatcher.dispatch(&frame, &peer_id),
+                        ).await {
+                            Ok(r) => r,
+                            Err(_) => {
+                                let mut err = Frame::new("408 TIMEOUT");
+                                err.set_body("dispatch timed out");
+                                if let Some(lane) = frame.header("Lane") {
+                                    err.set_header("Lane", lane);
+                                }
+                                tunnel.send_frame(&err).await?;
+                                continue;
+                            }
+                        }
+                    } else {
+                        dispatcher.dispatch(&frame, &peer_id).await
+                    };
+
+                    // Cache response if Idem token is present.
+                    if let Some(idem_token) = frame.header("Idem") {
+                        self.idem_cache.insert(idem_token.to_string(), result.response.clone());
+                    }
+
                     tunnel.send_frame(&result.response).await?;
 
                     // Same-tunnel extras (e.g. SUBSCRIBE replay).
@@ -496,6 +588,8 @@ impl Burrow {
         }
 
         // ── Cleanup ────────────────────────────────────────────
+        self.active_connections.fetch_sub(1, Ordering::Relaxed);
+        self.rate_limiter.remove_peer(&peer_id);
         self.sessions.unregister(&peer_id);
 
         if let Err(e) = self.save_trust() {
@@ -539,7 +633,10 @@ impl Burrow {
 
         // ── Session resumption check ───────────────────────
         let resumed = if let Some(resume_token) = hello.header("Resume") {
-            let saved = self.saved_sessions.lock().unwrap();
+            let saved = self
+                .saved_sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             saved
                 .iter()
                 .any(|s| s.session_token == resume_token && s.peer_id == peer_id)
@@ -563,7 +660,7 @@ impl Burrow {
 
         // ── Default capability grants ──────────────────────────
         {
-            let mut caps = self.capabilities.lock().unwrap();
+            let mut caps = self.capabilities.lock().unwrap_or_else(|e| e.into_inner());
             if peer_id.starts_with("anonymous") {
                 caps.grant(&peer_id, Capability::Fetch, 86400);
                 caps.grant(&peer_id, Capability::List, 86400);

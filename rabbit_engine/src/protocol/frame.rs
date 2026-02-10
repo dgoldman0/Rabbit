@@ -195,6 +195,136 @@ impl fmt::Display for Frame {
     }
 }
 
+/// Multi-part frame reassembly (H7).
+///
+/// The `Part` header supports streaming large responses across
+/// multiple frames:
+///   * `Part: BEGIN` — first chunk
+///   * `Part: MORE` — continuation chunk
+///   * `Part: END` — final chunk
+///
+/// The assembler accumulates body data and produces a complete frame
+/// when `END` is received.
+#[derive(Debug)]
+pub struct PartAssembler {
+    /// Accumulated body chunks.
+    chunks: Vec<String>,
+    /// The "base" frame (verb, args, headers from the BEGIN frame).
+    base: Option<Frame>,
+    /// Whether we are currently assembling a multi-part sequence.
+    active: bool,
+}
+
+impl PartAssembler {
+    /// Create a new assembler (not yet accumulating).
+    pub fn new() -> Self {
+        Self {
+            chunks: Vec::new(),
+            base: None,
+            active: false,
+        }
+    }
+
+    /// Feed a frame to the assembler.
+    ///
+    /// Returns:
+    /// - `Some(frame)` if the frame completes a multi-part sequence
+    ///   (or is a single-part frame that doesn't need assembly).
+    /// - `None` if the frame was a BEGIN or MORE chunk (stored
+    ///   internally, waiting for END).
+    pub fn feed(&mut self, frame: Frame) -> Option<Frame> {
+        match frame.header("Part") {
+            Some("BEGIN") => {
+                self.active = true;
+                if let Some(ref body) = frame.body {
+                    self.chunks.push(body.clone());
+                }
+                self.base = Some(Frame {
+                    body: None,
+                    ..frame
+                });
+                None
+            }
+            Some("MORE") if self.active => {
+                if let Some(ref body) = frame.body {
+                    self.chunks.push(body.clone());
+                }
+                None
+            }
+            Some("END") if self.active => {
+                if let Some(ref body) = frame.body {
+                    self.chunks.push(body.clone());
+                }
+                let combined_body = self.chunks.join("");
+                let mut result = self.base.take().unwrap_or(frame);
+                result.set_body(combined_body);
+                // Remove the Part header from the reassembled frame.
+                result.headers.remove("Part");
+                self.chunks.clear();
+                self.active = false;
+                Some(result)
+            }
+            _ => {
+                // Not a multi-part frame — pass through.
+                Some(frame)
+            }
+        }
+    }
+
+    /// Check whether the assembler is currently accumulating chunks.
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Reset the assembler, discarding any partial state.
+    pub fn reset(&mut self) {
+        self.chunks.clear();
+        self.base = None;
+        self.active = false;
+    }
+}
+
+impl Default for PartAssembler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Split a large body into multi-part frames.
+///
+/// Returns a `Vec<Frame>` with Part: BEGIN, Part: MORE..., Part: END.
+/// Each chunk will be at most `chunk_size` bytes.
+pub fn split_multipart(base: &Frame, body: &str, chunk_size: usize) -> Vec<Frame> {
+    if body.len() <= chunk_size {
+        // Fits in one frame — no multi-part needed.
+        let mut f = base.clone();
+        f.set_body(body);
+        return vec![f];
+    }
+
+    let chunks: Vec<&str> = body
+        .as_bytes()
+        .chunks(chunk_size)
+        .map(|c| std::str::from_utf8(c).unwrap_or(""))
+        .collect();
+
+    let mut frames = Vec::with_capacity(chunks.len());
+    for (i, chunk) in chunks.iter().enumerate() {
+        let mut f = base.clone();
+        let part = if i == 0 {
+            "BEGIN"
+        } else if i == chunks.len() - 1 {
+            "END"
+        } else {
+            "MORE"
+        };
+        f.set_header("Part", part);
+        f.set_body(*chunk);
+        frames.push(f);
+    }
+    frames
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
