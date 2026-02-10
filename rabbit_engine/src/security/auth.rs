@@ -49,6 +49,8 @@ pub enum HandshakeState {
         session_token: String,
         /// Peer's burrow ID.
         peer_id: String,
+        /// The peer's raw public key bytes (preserved for TOFU).
+        peer_pubkey: [u8; 32],
     },
     /// Anonymous session (no auth required).
     Anonymous {
@@ -205,6 +207,7 @@ impl Authenticator {
         self.state = HandshakeState::Authenticated {
             session_token: token,
             peer_id,
+            peer_pubkey,
         };
 
         Ok(response)
@@ -232,6 +235,15 @@ impl Authenticator {
         match &self.state {
             HandshakeState::Authenticated { peer_id, .. } => Some(peer_id),
             HandshakeState::Anonymous { .. } => Some("anonymous"),
+            _ => None,
+        }
+    }
+
+    /// Return the peer's raw public key bytes, if authentication
+    /// completed (not available for anonymous sessions).
+    pub fn peer_pubkey(&self) -> Option<[u8; 32]> {
+        match &self.state {
+            HandshakeState::Authenticated { peer_pubkey, .. } => Some(*peer_pubkey),
             _ => None,
         }
     }

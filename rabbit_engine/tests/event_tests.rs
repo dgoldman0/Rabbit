@@ -15,7 +15,7 @@ fn full_pubsub_lifecycle() {
     engine.subscribe("/q/chat", "bob", "7", None);
 
     // Publish
-    let frames = engine.publish("/q/chat", "First message");
+    let (frames, _) = engine.publish("/q/chat", "First message");
     assert_eq!(frames.len(), 2);
     assert!(frames.iter().all(|f| f.verb == "EVENT"));
     assert!(frames
@@ -23,7 +23,7 @@ fn full_pubsub_lifecycle() {
         .all(|f| f.body.as_deref() == Some("First message")));
 
     // Publish again
-    let frames = engine.publish("/q/chat", "Second message");
+    let (frames, _) = engine.publish("/q/chat", "Second message");
     assert_eq!(frames.len(), 2);
     assert!(frames.iter().all(|f| f.header("Seq") == Some("2")));
 
@@ -31,7 +31,7 @@ fn full_pubsub_lifecycle() {
     assert!(engine.unsubscribe("/q/chat", "bob"));
 
     // Publish after unsubscribe — only alice gets it
-    let frames = engine.publish("/q/chat", "Third message");
+    let (frames, _) = engine.publish("/q/chat", "Third message");
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].header("Lane"), Some("5")); // alice's lane
 }
@@ -40,11 +40,11 @@ fn full_pubsub_lifecycle() {
 fn replay_on_late_subscribe() {
     let engine = EventEngine::new();
     engine.subscribe("/q/log", "system", "0", None);
-    engine.publish("/q/log", "a");
-    engine.publish("/q/log", "b");
-    engine.publish("/q/log", "c");
-    engine.publish("/q/log", "d");
-    engine.publish("/q/log", "e");
+    let _ = engine.publish("/q/log", "a");
+    let _ = engine.publish("/q/log", "b");
+    let _ = engine.publish("/q/log", "c");
+    let _ = engine.publish("/q/log", "d");
+    let _ = engine.publish("/q/log", "e");
 
     // Late subscriber wants everything after seq 2
     let replay = engine.subscribe("/q/log", "latecomer", "10", Some(2));
@@ -191,7 +191,7 @@ fn engine_restore_from_continuity() {
     assert_eq!(replay[1].body.as_deref(), Some("old-5"));
 
     // New publish should get seq 6
-    let frames = engine.publish("/q/chat", "new-event");
+    let (frames, _) = engine.publish("/q/chat", "new-event");
     assert_eq!(frames[0].header("Seq"), Some("6"));
 }
 
@@ -201,9 +201,9 @@ fn multiple_topics_independent() {
     engine.subscribe("/q/alpha", "alice", "1", None);
     engine.subscribe("/q/beta", "bob", "2", None);
 
-    engine.publish("/q/alpha", "alpha-1");
-    engine.publish("/q/beta", "beta-1");
-    engine.publish("/q/alpha", "alpha-2");
+    let _ = engine.publish("/q/alpha", "alpha-1");
+    let _ = engine.publish("/q/beta", "beta-1");
+    let _ = engine.publish("/q/alpha", "alpha-2");
 
     assert_eq!(engine.event_count("/q/alpha"), 2);
     assert_eq!(engine.event_count("/q/beta"), 1);

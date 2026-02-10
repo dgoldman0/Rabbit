@@ -14,8 +14,9 @@
 //!   incoming tunnel (handshake → dispatch → close).
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use crate::config::Config;
 use crate::content::loader::load_content;
@@ -24,9 +25,11 @@ use crate::dispatch::router::{DispatchResult, Dispatcher};
 use crate::events::continuity::ContinuityStore;
 use crate::events::engine::EventEngine;
 use crate::protocol::error::ProtocolError;
+use crate::protocol::frame::Frame;
+use crate::protocol::lane_manager::LaneManager;
 use crate::security::auth::{build_auth_proof, build_hello, Authenticator};
 use crate::security::identity::Identity;
-use crate::security::permissions::CapabilityManager;
+use crate::security::permissions::{Capability, CapabilityManager};
 use crate::security::trust::TrustCache;
 use crate::transport::tunnel::Tunnel;
 use crate::warren::peers::PeerTable;
@@ -43,10 +46,10 @@ pub struct Burrow {
     pub events: EventEngine,
     /// Append-only event persistence.
     pub continuity: Option<ContinuityStore>,
-    /// TOFU trust cache.
-    pub trust: TrustCache,
-    /// Capability grants.
-    pub capabilities: CapabilityManager,
+    /// TOFU trust cache (interior mutability for concurrent tunnel access).
+    pub trust: Mutex<TrustCache>,
+    /// Capability grants (interior mutability for concurrent tunnel access).
+    pub capabilities: Mutex<CapabilityManager>,
     /// Known peers (warren membership).
     pub peers: PeerTable,
     /// Whether authentication is required for incoming connections.
@@ -89,15 +92,30 @@ impl Burrow {
         // ── Event engine ───────────────────────────────────────
         let events = EventEngine::new();
 
-        // Load topics from config into the engine (pre-create them
-        // via a no-op publish so they show in topic lists).
-        // Actually we just ensure they exist; publishing "" would
-        // create noise.  For now topics are lazily created on first
-        // publish/subscribe.
-
         // ── Continuity store ───────────────────────────────────
         let events_dir = storage.join("events");
         let continuity = ContinuityStore::new(&events_dir).ok();
+
+        // Restore persisted events into the engine from continuity.
+        if let Some(ref cont) = continuity {
+            if let Ok(entries) = std::fs::read_dir(&events_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("log") {
+                        // Derive topic from filename: q_chat.log → /q/chat
+                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                            let topic = format!("/{}", stem.replace('_', "/"));
+                            if let Ok(loaded) = cont.load(&topic) {
+                                if !loaded.is_empty() {
+                                    info!(topic = %topic, count = loaded.len(), "restored events from continuity");
+                                    events.load_events(&topic, loaded);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // ── Trust cache ────────────────────────────────────────
         let trust_path = storage.join("trust.tsv");
@@ -117,8 +135,8 @@ impl Burrow {
             content,
             events,
             continuity,
-            trust,
-            capabilities,
+            trust: Mutex::new(trust),
+            capabilities: Mutex::new(capabilities),
             peers,
             require_auth: config.identity.require_auth,
             base_dir,
@@ -136,8 +154,8 @@ impl Burrow {
             content: ContentStore::new(),
             events: EventEngine::new(),
             continuity: None,
-            trust: TrustCache::new(),
-            capabilities: CapabilityManager::new(),
+            trust: Mutex::new(TrustCache::new()),
+            capabilities: Mutex::new(CapabilityManager::new()),
             peers: PeerTable::new(),
             require_auth: true,
             base_dir: PathBuf::from("."),
@@ -158,21 +176,31 @@ impl Burrow {
     pub fn save_trust(&self) -> Result<(), ProtocolError> {
         let storage = self.base_dir.join("data");
         let trust_path = storage.join("trust.tsv");
-        self.trust.save(&trust_path)
+        self.trust.lock().unwrap().save(&trust_path)
     }
 
     /// Create a [`Dispatcher`] that borrows this burrow's content,
-    /// event engine, and peer table.
+    /// event engine, peer table, capabilities, and continuity store.
     pub fn dispatcher(&self) -> Dispatcher<'_> {
-        Dispatcher::new(&self.content, &self.events).with_peers(&self.peers)
+        let mut d = Dispatcher::new(&self.content, &self.events)
+            .with_peers(&self.peers)
+            .with_capabilities(&self.capabilities);
+        if let Some(ref cont) = self.continuity {
+            d = d.with_continuity(cont);
+        }
+        d
     }
 
     /// Run the server-side protocol loop on an incoming tunnel.
     ///
     /// 1. Perform the HELLO/CHALLENGE/AUTH handshake.
-    /// 2. Dispatch frames until the tunnel is closed or an error
+    /// 2. TOFU: verify-or-remember the peer's public key.
+    /// 3. Grant default capabilities based on auth status.
+    /// 4. Dispatch frames until the tunnel is closed or an error
     ///    occurs.
-    /// 3. Returns the authenticated peer ID (or "anonymous").
+    /// 5. Save trust cache on exit.
+    ///
+    /// Returns the authenticated peer ID (or "anonymous").
     #[instrument(skip(self, tunnel), fields(burrow = %self.name))]
     pub async fn handle_tunnel<T: Tunnel>(&self, tunnel: &mut T) -> Result<String, ProtocolError> {
         // ── Handshake ──────────────────────────────────────────
@@ -201,8 +229,36 @@ impl Burrow {
         let peer_id = auth.peer_id().unwrap_or("anonymous").to_string();
         debug!(peer_id = %peer_id, "handshake complete");
 
-        // ── Dispatch loop ──────────────────────────────────────
+        // ── TOFU trust verification ────────────────────────────
+        if let Some(peer_pubkey) = auth.peer_pubkey() {
+            // Authenticated peer — verify or remember their key.
+            self.trust
+                .lock()
+                .unwrap()
+                .verify_or_remember(&peer_id, &peer_pubkey)?;
+            debug!(peer_id = %peer_id, "TOFU verified");
+        }
+
+        // ── Default capability grants ──────────────────────────
+        {
+            let mut caps = self.capabilities.lock().unwrap();
+            if peer_id == "anonymous" {
+                // Anonymous: read-only access.
+                caps.grant(&peer_id, Capability::Fetch, 86400);
+                caps.grant(&peer_id, Capability::List, 86400);
+            } else {
+                // Authenticated: standard access.
+                caps.grant(&peer_id, Capability::Fetch, 86400);
+                caps.grant(&peer_id, Capability::List, 86400);
+                caps.grant(&peer_id, Capability::Subscribe, 86400);
+                caps.grant(&peer_id, Capability::Publish, 86400);
+            }
+        }
+
+        // ── Dispatch loop with lane management ─────────────────
         let dispatcher = self.dispatcher();
+        let lanes = LaneManager::new();
+
         loop {
             let frame = match tunnel.recv_frame().await? {
                 Some(f) => f,
@@ -212,11 +268,49 @@ impl Burrow {
                 }
             };
 
+            let lane_id: u16 = frame
+                .header("Lane")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+
+            // ── ACK/CREDIT: handle at the lane level ───────────
+            match frame.verb.as_str() {
+                "ACK" => {
+                    let ack_seq: u64 = frame
+                        .header("ACK")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    lanes.ack(lane_id, ack_seq).await;
+                    let mut resp = Frame::new("200 OK");
+                    resp.set_header("Lane", lane_id.to_string());
+                    tunnel.send_frame(&resp).await?;
+                    continue;
+                }
+                "CREDIT" => {
+                    let n: u32 = frame
+                        .header("Credit")
+                        .and_then(|s| s.trim_start_matches('+').parse().ok())
+                        .unwrap_or(0);
+                    lanes.add_credit(lane_id, n).await;
+                    let mut resp = Frame::new("200 OK");
+                    resp.set_header("Lane", lane_id.to_string());
+                    tunnel.send_frame(&resp).await?;
+                    continue;
+                }
+                _ => {}
+            }
+
+            // ── Normal dispatch ────────────────────────────────
             let result: DispatchResult = dispatcher.dispatch(&frame, &peer_id).await;
             tunnel.send_frame(&result.response).await?;
             for extra in &result.extras {
                 tunnel.send_frame(extra).await?;
             }
+        }
+
+        // ── Cleanup: persist trust cache ───────────────────────
+        if let Err(e) = self.save_trust() {
+            warn!(error = %e, "failed to save trust cache on tunnel close");
         }
 
         Ok(peer_id)
@@ -351,6 +445,12 @@ file = "readme.txt"
         burrow
             .content
             .register_menu("/", vec![MenuItem::info("hello")]);
+        // Grant List capability to the test peer.
+        burrow
+            .capabilities
+            .lock()
+            .unwrap()
+            .grant("test-peer", Capability::List, 3600);
 
         let dispatcher = burrow.dispatcher();
         let frame = Frame::with_args("LIST", vec!["/".into()]);
@@ -446,8 +546,8 @@ file = "readme.txt"
 
     #[tokio::test]
     async fn handle_tunnel_pub_sub() {
-        let mut server = Burrow::in_memory("server");
-        server.require_auth = false;
+        // Use authenticated mode so the peer gets Subscribe + Publish caps.
+        let server = Burrow::in_memory("server");
 
         let (mut c, mut s) = memory_tunnel_pair("c", "s");
 

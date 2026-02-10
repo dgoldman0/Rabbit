@@ -4,14 +4,15 @@
 //! on the [`EventEngine`](super::engine::EventEngine) and produce
 //! the appropriate response frames.
 
-use crate::events::engine::EventEngine;
+use crate::events::engine::{Event, EventEngine};
 use crate::protocol::frame::Frame;
 
 /// Handle a `PUBLISH` request.
 ///
 /// Publishes the body to the named topic and returns the broadcast
-/// EVENT frames that should be delivered to subscribers.
-pub fn handle_publish(engine: &EventEngine, topic: &str, body: &str) -> Vec<Frame> {
+/// EVENT frames that should be delivered to subscribers, plus the
+/// persisted [`Event`] for continuity.
+pub fn handle_publish(engine: &EventEngine, topic: &str, body: &str) -> (Vec<Frame>, Event) {
     engine.publish(topic, body)
 }
 
@@ -36,16 +37,18 @@ mod tests {
     fn publish_returns_broadcast() {
         let engine = EventEngine::new();
         engine.subscribe("/q/test", "alice", "1", None);
-        let frames = handle_publish(&engine, "/q/test", "hello");
+        let (frames, event) = handle_publish(&engine, "/q/test", "hello");
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].verb, "EVENT");
+        assert_eq!(event.seq, 1);
+        assert_eq!(event.body, "hello");
     }
 
     #[test]
     fn subscribe_with_replay() {
         let engine = EventEngine::new();
         engine.subscribe("/q/test", "system", "0", None);
-        engine.publish("/q/test", "old-event");
+        let _ = engine.publish("/q/test", "old-event");
 
         let replay = handle_subscribe(&engine, "/q/test", "bob", "3", Some(0));
         assert_eq!(replay.len(), 1);

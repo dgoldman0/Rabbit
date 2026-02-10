@@ -145,7 +145,10 @@ impl EventEngine {
     /// Appends the event to the topic log and returns EVENT frames
     /// for each active subscriber.  If the topic doesn't exist, it
     /// is created.
-    pub fn publish(&self, topic: &str, body: &str) -> Vec<Frame> {
+    ///
+    /// Returns `(broadcast_frames, event)` — the caller can use the
+    /// `Event` for continuity persistence.
+    pub fn publish(&self, topic: &str, body: &str) -> (Vec<Frame>, Event) {
         let mut topics = self.inner.lock().unwrap();
         let state = topics
             .entry(topic.to_string())
@@ -167,8 +170,9 @@ impl EventEngine {
             })
             .collect();
 
+        let event_clone = event.clone();
         state.events.push(event);
-        frames
+        (frames, event_clone)
     }
 
     /// Replay events from a topic starting after `since_seq`.
@@ -272,12 +276,14 @@ mod tests {
     fn publish_creates_event() {
         let engine = EventEngine::new();
         engine.subscribe("/q/chat", "alice", "5", None);
-        let frames = engine.publish("/q/chat", "Hello!");
+        let (frames, event) = engine.publish("/q/chat", "Hello!");
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].verb, "EVENT");
         assert_eq!(frames[0].args, vec!["/q/chat"]);
         assert_eq!(frames[0].header("Seq"), Some("1"));
         assert_eq!(frames[0].body.as_deref(), Some("Hello!"));
+        assert_eq!(event.seq, 1);
+        assert_eq!(event.body, "Hello!");
         assert_eq!(engine.event_count("/q/chat"), 1);
     }
 
@@ -286,7 +292,7 @@ mod tests {
         let engine = EventEngine::new();
         engine.subscribe("/q/chat", "alice", "5", None);
         engine.subscribe("/q/chat", "bob", "7", None);
-        let frames = engine.publish("/q/chat", "Announcement");
+        let (frames, _) = engine.publish("/q/chat", "Announcement");
         assert_eq!(frames.len(), 2);
         // Both should be EVENT frames
         assert!(frames.iter().all(|f| f.verb == "EVENT"));
@@ -300,9 +306,9 @@ mod tests {
         let engine = EventEngine::new();
         // Publish some events first (need a subscriber to create topic)
         engine.subscribe("/q/log", "system", "0", None);
-        engine.publish("/q/log", "event-1");
-        engine.publish("/q/log", "event-2");
-        engine.publish("/q/log", "event-3");
+        let _ = engine.publish("/q/log", "event-1");
+        let _ = engine.publish("/q/log", "event-2");
+        let _ = engine.publish("/q/log", "event-3");
 
         // New subscriber asks for replay from seq 1 (gets events 2 and 3)
         let replay = engine.subscribe("/q/log", "alice", "5", Some(1));
@@ -315,8 +321,8 @@ mod tests {
     fn subscribe_replay_all() {
         let engine = EventEngine::new();
         engine.subscribe("/q/log", "system", "0", None);
-        engine.publish("/q/log", "event-1");
-        engine.publish("/q/log", "event-2");
+        let _ = engine.publish("/q/log", "event-1");
+        let _ = engine.publish("/q/log", "event-2");
 
         // since_seq = 0 means replay all
         let replay = engine.subscribe("/q/log", "bob", "3", Some(0));
@@ -332,7 +338,7 @@ mod tests {
         assert_eq!(engine.subscriber_count("/q/chat"), 0);
 
         // Publish should produce no broadcast frames
-        let frames = engine.publish("/q/chat", "nobody hears this");
+        let (frames, _) = engine.publish("/q/chat", "nobody hears this");
         assert!(frames.is_empty());
     }
 
@@ -346,9 +352,9 @@ mod tests {
     fn replay_standalone() {
         let engine = EventEngine::new();
         engine.subscribe("/q/log", "sys", "0", None);
-        engine.publish("/q/log", "a");
-        engine.publish("/q/log", "b");
-        engine.publish("/q/log", "c");
+        let _ = engine.publish("/q/log", "a");
+        let _ = engine.publish("/q/log", "b");
+        let _ = engine.publish("/q/log", "c");
 
         let frames = engine.replay("/q/log", 1, "9");
         assert_eq!(frames.len(), 2);
@@ -369,9 +375,9 @@ mod tests {
     fn event_sequence_numbers_increment() {
         let engine = EventEngine::new();
         engine.subscribe("/q/seq", "alice", "1", None);
-        engine.publish("/q/seq", "a");
-        engine.publish("/q/seq", "b");
-        engine.publish("/q/seq", "c");
+        let _ = engine.publish("/q/seq", "a");
+        let _ = engine.publish("/q/seq", "b");
+        let _ = engine.publish("/q/seq", "c");
         let events = engine.events("/q/seq");
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].seq, 1);
@@ -397,8 +403,9 @@ mod tests {
 
         // Next publish should get seq 3
         engine.subscribe("/q/restored", "alice", "1", None);
-        let frames = engine.publish("/q/restored", "new");
+        let (frames, event) = engine.publish("/q/restored", "new");
         assert_eq!(frames[0].header("Seq"), Some("3"));
+        assert_eq!(event.seq, 3);
     }
 
     #[test]
@@ -406,7 +413,7 @@ mod tests {
         let engine = EventEngine::new();
         engine.subscribe("/q/prune", "sys", "0", None);
         for i in 0..10 {
-            engine.publish("/q/prune", &format!("event-{}", i));
+            let _ = engine.publish("/q/prune", &format!("event-{}", i));
         }
         assert_eq!(engine.event_count("/q/prune"), 10);
         engine.prune("/q/prune", 3);
@@ -429,7 +436,7 @@ mod tests {
     fn publish_to_topic_with_no_subscribers() {
         let engine = EventEngine::new();
         // Publish creates topic but no subscribers = no frames
-        let frames = engine.publish("/q/empty", "hello");
+        let (frames, _) = engine.publish("/q/empty", "hello");
         assert!(frames.is_empty());
         assert_eq!(engine.event_count("/q/empty"), 1);
     }
