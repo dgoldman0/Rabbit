@@ -21,6 +21,8 @@ use rabbit_engine::config::Config;
 use rabbit_engine::transport::cert::{generate_self_signed, make_server_config, CertPair};
 use rabbit_engine::transport::connector::{connect, make_client_config_insecure};
 use rabbit_engine::transport::listener::RabbitListener;
+use rabbit_engine::ai::connector::spawn_connectors;
+use rabbit_engine::ai::http::tls_config;
 use rabbit_engine::transport::tunnel::Tunnel;
 
 /// Rabbit burrow — headless peer-to-peer node.
@@ -177,6 +179,17 @@ async fn cmd_serve(
         });
     }
 
+    // Spawn AI connectors if configured.
+    let _ai_shutdown = if !burrow.ai_chats.is_empty() {
+        let ai_tls = tls_config();
+        let ai_events = std::sync::Arc::clone(&burrow.events);
+        let chats = burrow.ai_chats.clone();
+        info!(count = chats.len(), "spawning AI connectors");
+        Some(spawn_connectors(chats, ai_events, ai_tls))
+    } else {
+        None
+    };
+
     // Accept loop — runs until Ctrl-C.
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
@@ -208,7 +221,13 @@ async fn cmd_serve(
         }
     }
 
-    // Graceful shutdown: save trust cache.
+    // Graceful shutdown: stop AI connectors.
+    if let Some(tx) = _ai_shutdown {
+        info!("stopping AI connectors");
+        let _ = tx.send(true);
+    }
+
+    // Save trust cache.
     info!("saving trust cache");
     if let Err(e) = burrow.save_trust() {
         warn!(err = %e, "failed to save trust cache");
