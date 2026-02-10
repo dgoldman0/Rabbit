@@ -17,7 +17,7 @@ use crate::gui::events::{Action, ActionMap};
 use crate::gui::renderer::Renderer;
 use crate::gui::state::{ConnectionStatus, NavStack};
 use crate::gui::theme::{self, Theme};
-use crate::gui::view_gen::{fallback_html, ViewContent};
+use crate::gui::view_gen::{fallback_html, ViewContent, ViewGenerator};
 use crate::transport::tunnel::Tunnel;
 
 // ── Static launch data ──────────────────────────────────────────
@@ -136,6 +136,7 @@ fn App() -> Element {
         let host = data.host.clone();
         let start_selector = data.selector.clone();
         let theme = theme_str.clone();
+        let ai_config = data.gui_config.ai_renderer.clone();
 
         async move {
             eprintln!("rabbit-gui: connecting to {}\u{2026}", host);
@@ -158,6 +159,21 @@ fn App() -> Element {
             status_text.set(format!("Connected to {}", id_short));
             eprintln!("rabbit-gui: connected to {}", conn.server_id);
 
+            // Create AI view generator if enabled and API key is available.
+            let mut view_gen: Option<ViewGenerator> = if ai_config.enabled {
+                if std::env::var("OPENAI_API_KEY").is_ok() {
+                    let tls = crate::ai::http::tls_config();
+                    eprintln!("rabbit-gui: AI view rendering enabled (model={})", ai_config.model);
+                    Some(ViewGenerator::new(tls, ai_config.clone()))
+                } else {
+                    eprintln!("rabbit-gui: AI rendering configured but OPENAI_API_KEY not set, using fallback");
+                    None
+                }
+            } else {
+                eprintln!("rabbit-gui: AI rendering disabled, using fallback views");
+                None
+            };
+
             let mut nav = NavStack::new(50);
             let mut current_selector = start_selector.clone();
 
@@ -165,6 +181,7 @@ fn App() -> Element {
                 &mut conn, &current_selector, &theme,
                 &mut html_content, &mut title,
                 &mut status_text, &mut current_actions,
+                &mut view_gen,
             ).await;
             nav.push(crate::gui::state::NavEntry::new(&current_selector, &host));
             can_back.set(nav.can_go_back());
@@ -182,6 +199,7 @@ fn App() -> Element {
                             &mut conn, &selector, &theme,
                             &mut html_content, &mut title,
                             &mut status_text, &mut current_actions,
+                            &mut view_gen,
                         ).await;
                         can_back.set(nav.can_go_back());
                         can_forward.set(nav.can_go_forward());
@@ -246,6 +264,7 @@ fn App() -> Element {
                                     &mut conn, &sel, &theme,
                                     &mut html_content, &mut title,
                                     &mut status_text, &mut current_actions,
+                                    &mut view_gen,
                                 ).await;
                             }
                             can_back.set(nav.can_go_back());
@@ -265,6 +284,7 @@ fn App() -> Element {
                                     &mut conn, &sel, &theme,
                                     &mut html_content, &mut title,
                                     &mut status_text, &mut current_actions,
+                                    &mut view_gen,
                                 ).await;
                             }
                             can_back.set(nav.can_go_back());
@@ -276,10 +296,11 @@ fn App() -> Element {
                             &ViewContent::Loading { selector: current_selector.clone() }, &theme));
                         status_text.set("Refreshing\u{2026}".into());
                         fetch_and_render(
-                            &mut conn, &current_selector, &theme,
-                            &mut html_content, &mut title,
-                            &mut status_text, &mut current_actions,
-                        ).await;
+                                    &mut conn, &current_selector, &theme,
+                                    &mut html_content, &mut title,
+                                    &mut status_text, &mut current_actions,
+                                    &mut view_gen,
+                                ).await;
                     }
                 }
             }
@@ -297,9 +318,19 @@ fn App() -> Element {
             let mut eval = document::eval(
                 r#"document.addEventListener('click', function(e) {
                     var el = e.target;
+                    // Walk up to find nearest element with an id
                     while (el && !el.id) el = el.parentElement;
-                    if (el && el.id) { e.preventDefault(); e.stopPropagation(); dioxus.send(el.id); }
-                });
+                    if (el && el.id) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        dioxus.send(el.id);
+                        return;
+                    }
+                    // Also block any <a> tag navigation even without an id
+                    var a = e.target;
+                    while (a && a.tagName !== 'A') a = a.parentElement;
+                    if (a) { e.preventDefault(); e.stopPropagation(); }
+                }, true);
                 await new Promise(function() {});"#,
             );
             loop {
@@ -378,6 +409,23 @@ fn App() -> Element {
 
 // ── Bridge helpers ─────────────────────────────────────────────
 
+/// Try AI rendering first; fall back to static HTML on failure.
+async fn render_content(
+    view_gen: &mut Option<ViewGenerator>,
+    content: &ViewContent,
+    theme: &str,
+) -> String {
+    if let Some(gen) = view_gen.as_mut() {
+        match gen.generate(content, theme).await {
+            Ok(html) => return html,
+            Err(e) => {
+                eprintln!("rabbit-gui: AI render failed ({}), using fallback", e);
+            }
+        }
+    }
+    fallback_html(content, theme)
+}
+
 async fn fetch_and_render(
     conn: &mut BurrowConnection,
     selector: &str,
@@ -386,6 +434,7 @@ async fn fetch_and_render(
     title_signal: &mut Signal<String>,
     status_signal: &mut Signal<String>,
     actions_signal: &mut Signal<ActionMap>,
+    view_gen: &mut Option<ViewGenerator>,
 ) {
     match bridge::list_selector(conn, selector).await {
         Ok(items) => {
@@ -393,7 +442,7 @@ async fn fetch_and_render(
                 selector: selector.to_string(),
                 items: items.clone(),
             };
-            html_signal.set(fallback_html(&content, theme));
+            html_signal.set(render_content(view_gen, &content, theme).await);
             actions_signal.set(ActionMap::from_menu(&items));
             title_signal.set(selector.to_string());
             status_signal.set(format!("Viewing {}", selector));
@@ -402,7 +451,7 @@ async fn fetch_and_render(
             match bridge::fetch_selector(conn, selector).await {
                 Ok(body) => {
                     let content = ViewContent::Text { selector: selector.to_string(), body };
-                    html_signal.set(fallback_html(&content, theme));
+                    html_signal.set(render_content(view_gen, &content, theme).await);
                     actions_signal.set(ActionMap::for_text_view());
                     title_signal.set(selector.to_string());
                     status_signal.set(format!("Viewing {}", selector));

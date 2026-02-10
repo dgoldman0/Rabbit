@@ -223,7 +223,7 @@ pub fn fallback_html(content: &ViewContent, theme: &str) -> String {
                 } else {
                     let icon = type_icon(item.type_code);
                     html.push_str(&format!(
-                        "<li style=\"padding:8px 0;\"><a id=\"item_{i}\" href=\"#\" \
+                        "<li style=\"padding:8px 0;\"><a id=\"item_{i}\" tabindex=\"0\" \
                          style=\"color:{accent};text-decoration:none;cursor:pointer;\">\
                          {icon} {}</a></li>",
                         item.label
@@ -237,7 +237,7 @@ pub fn fallback_html(content: &ViewContent, theme: &str) -> String {
             let escaped = html_escape(body);
             format!(
                 "<html><body style=\"background:{bg};color:{fg};font-family:sans-serif;padding:24px;\">\
-                 <header><a id=\"nav_back\" href=\"#\" style=\"color:{accent};\">\u{2190} Back</a></header>\
+                 <header><a id=\"nav_back\" tabindex=\"0\" style=\"color:{accent};cursor:pointer;\">\u{2190} Back</a></header>\
                  <article style=\"margin-top:16px;\"><h2 style=\"color:{accent};\">{selector}</h2>\
                  <pre style=\"white-space:pre-wrap;\">{escaped}</pre></article></body></html>"
             )
