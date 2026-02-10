@@ -3,6 +3,7 @@
 //! A text-based, peer-to-peer, asynchronous protocol engine for
 //! building federated networks of burrows and warrens.
 
+pub mod ai;
 pub mod burrow;
 pub mod config;
 pub mod content;
