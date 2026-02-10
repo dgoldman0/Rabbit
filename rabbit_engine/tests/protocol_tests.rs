@@ -43,7 +43,7 @@ fn list_and_fetch_sequence() {
     // LIST request
     let mut list_req = Frame::with_args("LIST", vec!["/".into()]);
     list_req.set_header("Lane", "1");
-    list_req.set_header("Txn", &txn.next());
+    list_req.set_header("Txn", txn.next());
     list_req.set_header("Accept-View", "menu/plain");
     let wire = list_req.serialize();
     let parsed = Frame::parse(&wire).unwrap();
@@ -62,7 +62,7 @@ fn list_and_fetch_sequence() {
     // FETCH request
     let mut fetch_req = Frame::with_args("FETCH", vec!["/0/readme".into()]);
     fetch_req.set_header("Lane", "3");
-    fetch_req.set_header("Txn", &txn.next());
+    fetch_req.set_header("Txn", txn.next());
     let wire = fetch_req.serialize();
     let parsed = Frame::parse(&wire).unwrap();
     assert_eq!(parsed.header("Txn"), Some("T-2"));
@@ -85,7 +85,7 @@ fn pubsub_event_flow() {
     // SUBSCRIBE
     let mut sub = Frame::with_args("SUBSCRIBE", vec!["/q/chat".into()]);
     sub.set_header("Lane", "5");
-    sub.set_header("Txn", &txn.next());
+    sub.set_header("Txn", txn.next());
     let wire = sub.serialize();
     let parsed = Frame::parse(&wire).unwrap();
     assert_eq!(parsed.verb, "SUBSCRIBE");
@@ -143,7 +143,7 @@ fn lane_sends_frames_with_credit() {
     // Build a frame, serialize it, try to send via lane
     let mut frame = Frame::with_args("FETCH", vec!["/0/readme".into()]);
     frame.set_header("Lane", "3");
-    frame.set_header("Txn", &txn.next());
+    frame.set_header("Txn", txn.next());
     let wire = frame.serialize();
 
     let result = lane.try_send(wire.clone());
@@ -193,8 +193,8 @@ async fn lane_manager_full_flow() {
     // Build and send a frame
     let mut frame = Frame::with_args("EVENT", vec!["/q/news".into()]);
     frame.set_header("Lane", "5");
-    frame.set_header("Seq", &seq1.to_string());
-    frame.set_header("Txn", &txn.next());
+    frame.set_header("Seq", seq1.to_string());
+    frame.set_header("Txn", txn.next());
     frame.set_body("Spec finalized.");
     let wire = frame.serialize();
 

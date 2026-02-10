@@ -263,10 +263,59 @@ Tokio features extended: added `net` and `io-util` for TCP and buffered I/O.
 
 ---
 
-## Phase 6: CLI and Release Polish ⬜
+## Phase 6: CLI and Release Polish ✅
 
-**Status:** Not started  
+**Status:** Complete  
+**Tests added:** 6 (integration, TLS-based)  
+**Total tests:** 239
+
+### Binaries implemented
+
+| Binary | Description |
+|--------|-------------|
+| `rabbit` | Single-burrow CLI. Subcommands: `serve` (load config, generate/load TLS certs, listen for connections, connect to peers, graceful Ctrl-C shutdown with trust cache save), `init` (generate starter `config.toml`), `info` (show identity, port, content summary). Flags: `--config`, `--name`, `--port`, `--storage`, `--connect` (repeatable). CLI overrides merge with config file values. |
+| `rabbit-warren` | Multi-burrow test harness. Flags: `--count`, `--base-port`, `--config-dir`. Spawns N burrows in-process, each with its own TLS listener. First burrow is root; all others connect to it automatically. Prints warren status summary. Graceful Ctrl-C shutdown saves all trust caches. |
+
+### Modules added / modified
+
+| Module | Description |
+|--------|-------------|
+| `src/bin/rabbit.rs` | CLI entry point using `clap` derive API. `cmd_serve()` — loads config, builds Burrow, generates/loads TLS certs (auto-generates self-signed on first run, saves to `certs/`), binds `RabbitListener`, spawns outgoing peer connections, runs `tokio::select!` accept loop with Ctrl-C shutdown. `cmd_init()` — writes starter TOML template. `cmd_info()` — prints identity/config summary. |
+| `src/bin/rabbit_warren.rs` | Warren launcher. Generates shared TLS cert pair, creates N burrows (from `--config-dir` or default in-memory configs), binds listeners, connects children to root, prints status table, waits for Ctrl-C. |
+| `src/burrow.rs` (modified) | Added `tracing` instrumentation: `#[instrument]` on `from_config`, `handle_tunnel`, `client_handshake`. `info!` for identity load/generate. `debug!` for handshake completion and tunnel close events. |
+| `tests/cli_tests.rs` | 6 integration tests exercising the full TLS stack. |
+
+### Dependencies added
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `clap` | 4 (with `derive` feature) | CLI argument parsing |
+| `tracing` | 0.1 | Structured logging |
+| `tracing-subscriber` | 0.3 (with `fmt` feature) | Log output formatting |
+| `tokio` (modified) | Added `signal` feature | Ctrl-C / SIGINT handling |
+
+### Test counts
+
+- **Integration tests (cli_tests.rs):** 6 — two-burrow TLS content exchange, three-burrow TLS warren, config template validation, config-built burrow over TLS, pub/sub over TLS, identity persistence across TLS sessions
+- **Phase 1-5 tests:** 233 (unchanged)
+- **Total:** 239
+- **Clippy warnings:** 0
+- **cargo fmt:** Clean
+
+### Key design decisions
+
+1. **Auto-generated TLS certs.** On first `rabbit serve`, if `certs/cert.pem` and `certs/key.pem` don't exist, self-signed certs are generated and saved. Subsequent runs reuse them.
+2. **CLI overrides config.** `--name`, `--port`, `--storage`, `--connect` flags take precedence over `config.toml` values. `--connect` peers merge with config peers (no duplicates).
+3. **Shared cert pair for warren.** `rabbit-warren` generates one cert pair shared by all burrows — simplifies local testing without per-burrow cert management.
+4. **Default in-memory configs.** When `--config-dir` is not specified, `rabbit-warren` generates sensible default configs (root named `warren-root`, children named `burrow-N`, each with a welcome menu and about page).
+5. **tracing over println.** All operational logging uses `tracing::info!`/`debug!`/`warn!` with structured fields. The binaries initialize `tracing-subscriber` with uptime timestamps. No `println!` in library code.
+6. **Graceful shutdown.** Both binaries handle `tokio::signal::ctrl_c()`. On shutdown: accept loop exits, trust caches are saved to disk, and the process exits cleanly.
+
+### Also in this phase
+
+- **Clippy cleanup:** Fixed 13 `needless_borrows_for_generic_args` warnings across 5 files (pre-existing from Phases 1-5, caught when `--all-targets` included the new binaries).
+- **README.md:** Complete rewrite with quickstart, CLI reference, example config, architecture diagram, dependency table, and project structure.
 
 ---
 
-*Last updated: 2026-02-09*
+*Last updated: 2026-02-10*

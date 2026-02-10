@@ -219,7 +219,7 @@ fn signed_frame_body_verifiable() {
     // Put the signature in a frame header
     let mut frame = Frame::new("PUBLISH /q/announcements");
     frame.set_header("Lane", "3");
-    frame.set_header("Sig", &format!("ed25519:{}", sig_hex));
+    frame.set_header("Sig", format!("ed25519:{}", sig_hex));
     frame.set_body(body);
 
     let wire = frame.serialize();

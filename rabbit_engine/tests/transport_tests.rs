@@ -45,8 +45,8 @@ async fn memory_tunnel_100_frames_ordered() {
     for i in 0u32..100 {
         let mut frame = Frame::new("EVENT");
         frame.set_header("Lane", "5");
-        frame.set_header("Seq", &i.to_string());
-        frame.set_body(&format!("payload-{}", i));
+        frame.set_header("Seq", i.to_string());
+        frame.set_body(format!("payload-{}", i));
         sender.send_frame(&frame).await.unwrap();
     }
 
@@ -224,8 +224,8 @@ async fn tls_tunnel_multiple_frames() {
     for i in 0u32..20 {
         let mut frame = Frame::new("EVENT");
         frame.set_header("Lane", "5");
-        frame.set_header("Seq", &i.to_string());
-        frame.set_body(&format!("event-data-{}", i));
+        frame.set_header("Seq", i.to_string());
+        frame.set_body(format!("event-data-{}", i));
         client.send_frame(&frame).await.unwrap();
     }
 

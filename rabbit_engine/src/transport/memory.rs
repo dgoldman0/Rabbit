@@ -120,7 +120,7 @@ mod tests {
         let (mut a, mut b) = memory_tunnel_pair("alice", "bob");
         for i in 0..100 {
             let mut frame = Frame::new("EVENT");
-            frame.set_header("Seq", &i.to_string());
+            frame.set_header("Seq", i.to_string());
             a.send_frame(&frame).await.unwrap();
         }
         for i in 0..100 {

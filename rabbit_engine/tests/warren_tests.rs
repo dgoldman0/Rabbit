@@ -169,18 +169,14 @@ async fn three_burrow_warren() {
     // Create three burrows.
     let mut b1 = Burrow::in_memory("alpha");
     b1.require_auth = false;
-    b1.content.register_menu(
-        "/",
-        vec![MenuItem::info("alpha root")],
-    );
+    b1.content
+        .register_menu("/", vec![MenuItem::info("alpha root")]);
     b1.content.register_text("/0/data", "alpha data");
 
     let mut b2 = Burrow::in_memory("beta");
     b2.require_auth = false;
-    b2.content.register_menu(
-        "/",
-        vec![MenuItem::info("beta root")],
-    );
+    b2.content
+        .register_menu("/", vec![MenuItem::info("beta root")]);
     b2.content.register_text("/0/data", "beta data");
 
     let b3 = Burrow::in_memory("gamma");

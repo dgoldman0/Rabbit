@@ -203,8 +203,8 @@ mod tests {
 
         for i in 0..50 {
             let mut frame = Frame::new("EVENT");
-            frame.set_header("Seq", &i.to_string());
-            frame.set_body(&format!("event-{}", i));
+            frame.set_header("Seq", i.to_string());
+            frame.set_body(format!("event-{}", i));
             client.send_frame(&frame).await.unwrap();
         }
 

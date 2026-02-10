@@ -15,6 +15,8 @@
 
 use std::path::{Path, PathBuf};
 
+use tracing::{debug, info, instrument};
+
 use crate::config::Config;
 use crate::content::loader::load_content;
 use crate::content::store::ContentStore;
@@ -64,6 +66,7 @@ impl Burrow {
     /// * A continuity store is created at `<storage>/events/`.
     /// * The trust cache is loaded from `<storage>/trust.tsv` if it
     ///   exists.
+    #[instrument(skip(config, base_dir), fields(name = %config.identity.name))]
     pub fn from_config(config: &Config, base_dir: impl AsRef<Path>) -> Result<Self, ProtocolError> {
         let base_dir = base_dir.as_ref().to_path_buf();
         let storage = base_dir.join(&config.identity.storage);
@@ -71,8 +74,10 @@ impl Burrow {
         // ── Identity ───────────────────────────────────────────
         let identity_path = storage.join("identity.key");
         let identity = if identity_path.exists() {
+            info!(path = %identity_path.display(), "loading existing identity");
             Identity::from_file(&identity_path)?
         } else {
+            info!(path = %identity_path.display(), "generating new identity");
             let id = Identity::generate();
             id.save(&identity_path)?;
             id
@@ -168,6 +173,7 @@ impl Burrow {
     /// 2. Dispatch frames until the tunnel is closed or an error
     ///    occurs.
     /// 3. Returns the authenticated peer ID (or "anonymous").
+    #[instrument(skip(self, tunnel), fields(burrow = %self.name))]
     pub async fn handle_tunnel<T: Tunnel>(&self, tunnel: &mut T) -> Result<String, ProtocolError> {
         // ── Handshake ──────────────────────────────────────────
         let mut auth = Authenticator::new(
@@ -193,13 +199,17 @@ impl Burrow {
         }
 
         let peer_id = auth.peer_id().unwrap_or("anonymous").to_string();
+        debug!(peer_id = %peer_id, "handshake complete");
 
         // ── Dispatch loop ──────────────────────────────────────
         let dispatcher = self.dispatcher();
         loop {
             let frame = match tunnel.recv_frame().await? {
                 Some(f) => f,
-                None => break, // tunnel closed cleanly
+                None => {
+                    debug!(peer_id = %peer_id, "tunnel closed");
+                    break;
+                }
             };
 
             let result: DispatchResult = dispatcher.dispatch(&frame, &peer_id).await;
@@ -215,6 +225,7 @@ impl Burrow {
     /// Run the client-side handshake on an outgoing tunnel.
     ///
     /// Returns the server's burrow ID on success.
+    #[instrument(skip(self, tunnel), fields(burrow = %self.name))]
     pub async fn client_handshake<T: Tunnel>(
         &self,
         tunnel: &mut T,
