@@ -142,13 +142,13 @@ impl EventEngine {
 
     /// Publish an event to a topic.
     ///
-    /// Appends the event to the topic log and returns EVENT frames
-    /// for each active subscriber.  If the topic doesn't exist, it
-    /// is created.
+    /// Appends the event to the topic log and returns `(peer_id, Frame)`
+    /// pairs for each active subscriber, plus the persisted [`Event`].
+    /// The caller uses the peer IDs to route frames to the correct
+    /// tunnels via the session manager.
     ///
-    /// Returns `(broadcast_frames, event)` — the caller can use the
-    /// `Event` for continuity persistence.
-    pub fn publish(&self, topic: &str, body: &str) -> (Vec<Frame>, Event) {
+    /// Returns `(targeted_broadcast_frames, event)`.
+    pub fn publish(&self, topic: &str, body: &str) -> (Vec<(String, Frame)>, Event) {
         let mut topics = self.inner.lock().unwrap();
         let state = topics
             .entry(topic.to_string())
@@ -160,13 +160,16 @@ impl EventEngine {
         };
         state.next_seq += 1;
 
-        // Build broadcast frames for each subscriber
-        let frames: Vec<Frame> = state
+        // Build targeted broadcast frames: (peer_id, frame) for each subscriber
+        let frames: Vec<(String, Frame)> = state
             .subscribers
             .values_mut()
             .map(|sub| {
                 sub.last_delivered_seq = event.seq;
-                TopicState::event_frame(topic, &event, &sub.lane)
+                (
+                    sub.peer_id.clone(),
+                    TopicState::event_frame(topic, &event, &sub.lane),
+                )
             })
             .collect();
 
@@ -278,10 +281,11 @@ mod tests {
         engine.subscribe("/q/chat", "alice", "5", None);
         let (frames, event) = engine.publish("/q/chat", "Hello!");
         assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].verb, "EVENT");
-        assert_eq!(frames[0].args, vec!["/q/chat"]);
-        assert_eq!(frames[0].header("Seq"), Some("1"));
-        assert_eq!(frames[0].body.as_deref(), Some("Hello!"));
+        assert_eq!(frames[0].0, "alice");
+        assert_eq!(frames[0].1.verb, "EVENT");
+        assert_eq!(frames[0].1.args, vec!["/q/chat"]);
+        assert_eq!(frames[0].1.header("Seq"), Some("1"));
+        assert_eq!(frames[0].1.body.as_deref(), Some("Hello!"));
         assert_eq!(event.seq, 1);
         assert_eq!(event.body, "Hello!");
         assert_eq!(engine.event_count("/q/chat"), 1);
@@ -295,9 +299,16 @@ mod tests {
         let (frames, _) = engine.publish("/q/chat", "Announcement");
         assert_eq!(frames.len(), 2);
         // Both should be EVENT frames
-        assert!(frames.iter().all(|f| f.verb == "EVENT"));
+        assert!(frames.iter().all(|(_, f)| f.verb == "EVENT"));
+        // Peer IDs should match subscribers
+        let peers: Vec<&str> = frames.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(peers.contains(&"alice"));
+        assert!(peers.contains(&"bob"));
         // Lanes should match each subscriber's lane
-        let lanes: Vec<&str> = frames.iter().map(|f| f.header("Lane").unwrap()).collect();
+        let lanes: Vec<&str> = frames
+            .iter()
+            .map(|(_, f)| f.header("Lane").unwrap())
+            .collect();
         assert!(lanes.contains(&"5") || lanes.contains(&"7"));
     }
 
@@ -404,7 +415,7 @@ mod tests {
         // Next publish should get seq 3
         engine.subscribe("/q/restored", "alice", "1", None);
         let (frames, event) = engine.publish("/q/restored", "new");
-        assert_eq!(frames[0].header("Seq"), Some("3"));
+        assert_eq!(frames[0].1.header("Seq"), Some("3"));
         assert_eq!(event.seq, 3);
     }
 

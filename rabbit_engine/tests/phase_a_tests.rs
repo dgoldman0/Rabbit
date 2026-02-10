@@ -221,23 +221,8 @@ async fn continuity_survives_restart() {
     {
         let burrow = Burrow::from_config(&config, dir.path()).unwrap();
 
-        // Need to manually grant anonymous caps for pub/sub.
-        burrow
-            .capabilities
-            .lock()
-            .unwrap()
-            .grant("anonymous", Capability::Subscribe, 86400);
-        burrow
-            .capabilities
-            .lock()
-            .unwrap()
-            .grant("anonymous", Capability::Publish, 86400);
-
-        let mut b = burrow;
-        b.require_auth = false;
-
         let (mut c, mut s) = memory_tunnel_pair("c1", "s1");
-        let sh = tokio::spawn(async move { b.handle_tunnel(&mut s).await });
+        let sh = tokio::spawn(async move { burrow.handle_tunnel(&mut s).await });
 
         let client = Burrow::in_memory("pub-client");
         client.client_handshake(&mut c).await.unwrap();

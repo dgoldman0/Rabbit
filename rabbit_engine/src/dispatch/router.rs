@@ -21,28 +21,48 @@ use crate::warren::peers::PeerTable;
 /// Result of dispatching a frame.
 ///
 /// Most verbs produce a single response.  `SUBSCRIBE` may produce an
-/// initial response *and* replay frames, so we return a `Vec`.
+/// initial response *and* replay frames (in `extras`).  `PUBLISH`
+/// produces a response for the publisher and targeted broadcast
+/// frames (in `broadcast`) that should be fanned out to subscriber
+/// tunnels via the session manager.
 #[derive(Debug)]
 pub struct DispatchResult {
     /// The primary response frame.
     pub response: Frame,
-    /// Additional frames to send after the response (e.g. replayed
-    /// events after a SUBSCRIBE acknowledgement).
+    /// Additional frames to send to the *same* tunnel after the
+    /// response (e.g. replayed events after SUBSCRIBE).
     pub extras: Vec<Frame>,
+    /// Targeted broadcast frames: `(peer_id, frame)` pairs to be
+    /// fanned out to other tunnels via the session manager.
+    pub broadcast: Vec<(String, Frame)>,
 }
 
 impl DispatchResult {
-    /// Create a result with a single response and no extras.
+    /// Create a result with a single response, no extras, no broadcast.
     pub fn single(response: Frame) -> Self {
         Self {
             response,
             extras: Vec::new(),
+            broadcast: Vec::new(),
         }
     }
 
-    /// Create a result with a response and additional frames.
+    /// Create a result with a response and same-tunnel extras.
     pub fn with_extras(response: Frame, extras: Vec<Frame>) -> Self {
-        Self { response, extras }
+        Self {
+            response,
+            extras,
+            broadcast: Vec::new(),
+        }
+    }
+
+    /// Create a result with a response and cross-tunnel broadcast.
+    pub fn with_broadcast(response: Frame, broadcast: Vec<(String, Frame)>) -> Self {
+        Self {
+            response,
+            extras: Vec::new(),
+            broadcast,
+        }
     }
 }
 
@@ -196,7 +216,7 @@ impl<'a> Dispatcher<'a> {
                 if !txn.is_empty() {
                     response.set_header("Txn", &txn);
                 }
-                DispatchResult::with_extras(response, broadcast)
+                DispatchResult::with_broadcast(response, broadcast)
             }
 
             // ── Keepalive ──────────────────────────────────────

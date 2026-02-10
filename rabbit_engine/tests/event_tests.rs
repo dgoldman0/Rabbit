@@ -17,15 +17,15 @@ fn full_pubsub_lifecycle() {
     // Publish
     let (frames, _) = engine.publish("/q/chat", "First message");
     assert_eq!(frames.len(), 2);
-    assert!(frames.iter().all(|f| f.verb == "EVENT"));
+    assert!(frames.iter().all(|(_, f)| f.verb == "EVENT"));
     assert!(frames
         .iter()
-        .all(|f| f.body.as_deref() == Some("First message")));
+        .all(|(_, f)| f.body.as_deref() == Some("First message")));
 
     // Publish again
     let (frames, _) = engine.publish("/q/chat", "Second message");
     assert_eq!(frames.len(), 2);
-    assert!(frames.iter().all(|f| f.header("Seq") == Some("2")));
+    assert!(frames.iter().all(|(_, f)| f.header("Seq") == Some("2")));
 
     // Unsubscribe bob
     assert!(engine.unsubscribe("/q/chat", "bob"));
@@ -33,7 +33,7 @@ fn full_pubsub_lifecycle() {
     // Publish after unsubscribe — only alice gets it
     let (frames, _) = engine.publish("/q/chat", "Third message");
     assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].header("Lane"), Some("5")); // alice's lane
+    assert_eq!(frames[0].1.header("Lane"), Some("5")); // alice's lane
 }
 
 #[test]
@@ -192,7 +192,7 @@ fn engine_restore_from_continuity() {
 
     // New publish should get seq 6
     let (frames, _) = engine.publish("/q/chat", "new-event");
-    assert_eq!(frames[0].header("Seq"), Some("6"));
+    assert_eq!(frames[0].1.header("Seq"), Some("6"));
 }
 
 #[test]

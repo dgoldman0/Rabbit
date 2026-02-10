@@ -281,22 +281,8 @@ body = "Built from TOML config, served over TLS."
 /// Pub/sub works over TLS tunnels.
 #[tokio::test]
 async fn pubsub_over_tls() {
-    use rabbit_engine::security::permissions::Capability;
-    let mut server = Burrow::in_memory("pubsub-tls");
-    server.require_auth = false;
-    // Anonymous peers get Fetch + List by default; grant Subscribe +
-    // Publish so this test exercises the pub/sub path.
-    server
-        .capabilities
-        .lock()
-        .unwrap()
-        .grant("anonymous", Capability::Subscribe, 86400);
-    server
-        .capabilities
-        .lock()
-        .unwrap()
-        .grant("anonymous", Capability::Publish, 86400);
-    let server = Arc::new(server);
+    // Use authenticated mode — authenticated peers get full caps.
+    let server = Arc::new(Burrow::in_memory("pubsub-tls"));
 
     let cert_pair = generate_self_signed().unwrap();
     let server_config = make_server_config(&cert_pair).unwrap();

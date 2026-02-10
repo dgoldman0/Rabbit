@@ -9,10 +9,14 @@ use crate::protocol::frame::Frame;
 
 /// Handle a `PUBLISH` request.
 ///
-/// Publishes the body to the named topic and returns the broadcast
-/// EVENT frames that should be delivered to subscribers, plus the
+/// Publishes the body to the named topic and returns targeted
+/// broadcast `(peer_id, Frame)` pairs for subscribers, plus the
 /// persisted [`Event`] for continuity.
-pub fn handle_publish(engine: &EventEngine, topic: &str, body: &str) -> (Vec<Frame>, Event) {
+pub fn handle_publish(
+    engine: &EventEngine,
+    topic: &str,
+    body: &str,
+) -> (Vec<(String, Frame)>, Event) {
     engine.publish(topic, body)
 }
 
@@ -39,7 +43,8 @@ mod tests {
         engine.subscribe("/q/test", "alice", "1", None);
         let (frames, event) = handle_publish(&engine, "/q/test", "hello");
         assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].verb, "EVENT");
+        assert_eq!(frames[0].0, "alice");
+        assert_eq!(frames[0].1.verb, "EVENT");
         assert_eq!(event.seq, 1);
         assert_eq!(event.body, "hello");
     }

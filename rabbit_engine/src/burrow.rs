@@ -14,6 +14,7 @@
 //!   incoming tunnel (handshake → dispatch → close).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use tracing::{debug, info, instrument, warn};
@@ -31,8 +32,12 @@ use crate::security::auth::{build_auth_proof, build_hello, Authenticator};
 use crate::security::identity::Identity;
 use crate::security::permissions::{Capability, CapabilityManager};
 use crate::security::trust::TrustCache;
+use crate::session::SessionManager;
 use crate::transport::tunnel::Tunnel;
 use crate::warren::peers::PeerTable;
+
+/// Global session counter for unique session IDs.
+static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A fully assembled burrow, ready to serve content and events.
 pub struct Burrow {
@@ -52,6 +57,8 @@ pub struct Burrow {
     pub capabilities: Mutex<CapabilityManager>,
     /// Known peers (warren membership).
     pub peers: PeerTable,
+    /// Session manager for cross-tunnel event fan-out.
+    pub sessions: SessionManager,
     /// Whether authentication is required for incoming connections.
     pub require_auth: bool,
     /// Base directory for the burrow's configuration.
@@ -126,6 +133,7 @@ impl Burrow {
         };
 
         // ── Capabilities and peers ─────────────────────────────
+        let sessions = SessionManager::new();
         let capabilities = CapabilityManager::new();
         let peers = PeerTable::new();
 
@@ -138,6 +146,7 @@ impl Burrow {
             trust: Mutex::new(trust),
             capabilities: Mutex::new(capabilities),
             peers,
+            sessions,
             require_auth: config.identity.require_auth,
             base_dir,
         })
@@ -157,6 +166,7 @@ impl Burrow {
             trust: Mutex::new(TrustCache::new()),
             capabilities: Mutex::new(CapabilityManager::new()),
             peers: PeerTable::new(),
+            sessions: SessionManager::new(),
             require_auth: true,
             base_dir: PathBuf::from("."),
         }
@@ -226,7 +236,13 @@ impl Burrow {
             tunnel.send_frame(&ok).await?;
         }
 
-        let peer_id = auth.peer_id().unwrap_or("anonymous").to_string();
+        let base_id = auth.peer_id().unwrap_or("anonymous").to_string();
+        let peer_id = if base_id == "anonymous" {
+            let n = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+            format!("anonymous-{n}")
+        } else {
+            base_id
+        };
         debug!(peer_id = %peer_id, "handshake complete");
 
         // ── TOFU trust verification ────────────────────────────
@@ -242,7 +258,7 @@ impl Burrow {
         // ── Default capability grants ──────────────────────────
         {
             let mut caps = self.capabilities.lock().unwrap();
-            if peer_id == "anonymous" {
+            if peer_id.starts_with("anonymous") {
                 // Anonymous: read-only access.
                 caps.grant(&peer_id, Capability::Fetch, 86400);
                 caps.grant(&peer_id, Capability::List, 86400);
@@ -259,56 +275,91 @@ impl Burrow {
         let dispatcher = self.dispatcher();
         let lanes = LaneManager::new();
 
+        // Register this tunnel with the session manager for cross-
+        // tunnel event fan-out.  The receiver feeds the writer half.
+        let mut fanout_rx = self.sessions.register(&peer_id, 256);
+
+        // Multiplex between inbound frames and fan-out frames from
+        // other tunnels using tokio::select!.
         loop {
-            let frame = match tunnel.recv_frame().await? {
-                Some(f) => f,
-                None => {
-                    debug!(peer_id = %peer_id, "tunnel closed");
-                    break;
-                }
-            };
+            tokio::select! {
+                // ── Inbound: frames from the tunnel ────────────
+                inbound = tunnel.recv_frame() => {
+                    let frame = match inbound? {
+                        Some(f) => f,
+                        None => {
+                            debug!(peer_id = %peer_id, "tunnel closed");
+                            break;
+                        }
+                    };
 
-            let lane_id: u16 = frame
-                .header("Lane")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-
-            // ── ACK/CREDIT: handle at the lane level ───────────
-            match frame.verb.as_str() {
-                "ACK" => {
-                    let ack_seq: u64 = frame
-                        .header("ACK")
+                    let lane_id: u16 = frame
+                        .header("Lane")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
-                    lanes.ack(lane_id, ack_seq).await;
-                    let mut resp = Frame::new("200 OK");
-                    resp.set_header("Lane", lane_id.to_string());
-                    tunnel.send_frame(&resp).await?;
-                    continue;
-                }
-                "CREDIT" => {
-                    let n: u32 = frame
-                        .header("Credit")
-                        .and_then(|s| s.trim_start_matches('+').parse().ok())
-                        .unwrap_or(0);
-                    lanes.add_credit(lane_id, n).await;
-                    let mut resp = Frame::new("200 OK");
-                    resp.set_header("Lane", lane_id.to_string());
-                    tunnel.send_frame(&resp).await?;
-                    continue;
-                }
-                _ => {}
-            }
 
-            // ── Normal dispatch ────────────────────────────────
-            let result: DispatchResult = dispatcher.dispatch(&frame, &peer_id).await;
-            tunnel.send_frame(&result.response).await?;
-            for extra in &result.extras {
-                tunnel.send_frame(extra).await?;
+                    // ── ACK/CREDIT: handle at the lane level ───
+                    match frame.verb.as_str() {
+                        "ACK" => {
+                            let ack_seq: u64 = frame
+                                .header("ACK")
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(0);
+                            lanes.ack(lane_id, ack_seq).await;
+                            let mut resp = Frame::new("200 OK");
+                            resp.set_header("Lane", lane_id.to_string());
+                            tunnel.send_frame(&resp).await?;
+                            continue;
+                        }
+                        "CREDIT" => {
+                            let n: u32 = frame
+                                .header("Credit")
+                                .and_then(|s| s.trim_start_matches('+').parse().ok())
+                                .unwrap_or(0);
+                            lanes.add_credit(lane_id, n).await;
+                            let mut resp = Frame::new("200 OK");
+                            resp.set_header("Lane", lane_id.to_string());
+                            tunnel.send_frame(&resp).await?;
+                            continue;
+                        }
+                        _ => {}
+                    }
+
+                    // ── Normal dispatch ────────────────────────
+                    let result: DispatchResult = dispatcher.dispatch(&frame, &peer_id).await;
+                    tunnel.send_frame(&result.response).await?;
+
+                    // Same-tunnel extras (e.g. SUBSCRIBE replay).
+                    for extra in &result.extras {
+                        tunnel.send_frame(extra).await?;
+                    }
+
+                    // Cross-tunnel broadcast via session manager.
+                    if !result.broadcast.is_empty() {
+                        self.sessions.broadcast(result.broadcast).await;
+                    }
+                }
+
+                // ── Outbound: fan-out frames from other tunnels ──
+                fanout = fanout_rx.recv() => {
+                    match fanout {
+                        Some(frame) => {
+                            tunnel.send_frame(&frame).await?;
+                        }
+                        None => {
+                            // Session manager dropped our channel —
+                            // another connection replaced us.
+                            debug!(peer_id = %peer_id, "session channel closed");
+                            break;
+                        }
+                    }
+                }
             }
         }
 
-        // ── Cleanup: persist trust cache ───────────────────────
+        // ── Cleanup ────────────────────────────────────────────
+        self.sessions.unregister(&peer_id);
+
         if let Err(e) = self.save_trust() {
             warn!(error = %e, "failed to save trust cache on tunnel close");
         }
