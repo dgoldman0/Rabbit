@@ -5,5 +5,6 @@
 //! are available without feature flags.  The Dioxus/Blitz rendering
 //! entry point requires the `gui` feature.
 
+pub mod dom;
 pub mod view_gen;
 
