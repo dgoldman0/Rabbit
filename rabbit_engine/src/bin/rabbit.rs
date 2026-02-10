@@ -198,6 +198,23 @@ async fn cmd_browse(addr: &str, start_selector: &str) -> Result<(), Box<dyn std:
             }
         }
 
+        // Follow 301 MOVED redirects (max 5 hops).
+        if response.verb.starts_with("301") {
+            if let Some(location) = response.header("Location") {
+                println!("  \u{27A1} Redirected to {}", location);
+                // Location may be "addr/selector" or just "/selector"
+                if location.starts_with('/') {
+                    current_selector = location.to_string();
+                } else if let Some(idx) = location.find('/') {
+                    // addr/selector — for now, just use the selector part
+                    current_selector = location[idx..].to_string();
+                } else {
+                    current_selector = location.to_string();
+                }
+                continue;
+            }
+        }
+
         if !response.verb.starts_with("200") {
             println!(
                 "  \u{2717} Error: {} {}",
@@ -319,6 +336,22 @@ async fn fetch_and_display<T: Tunnel>(
         return Ok(());
     }
 
+    // Follow 301 redirects (max 5 hops).
+    if response.verb.starts_with("301") {
+        if let Some(location) = response.header("Location") {
+            println!("  \u{27A1} Redirected to {}", location);
+            let new_sel = if location.starts_with('/') {
+                location.to_string()
+            } else if let Some(idx) = location.find('/') {
+                location[idx..].to_string()
+            } else {
+                location.to_string()
+            };
+            // Recursive fetch with redirect — box to avoid infinite loop
+            return Box::pin(fetch_and_display(tunnel, &new_sel)).await;
+        }
+    }
+
     let view = response.header("View").unwrap_or("text");
 
     println!();
@@ -337,9 +370,14 @@ async fn fetch_and_display<T: Tunnel>(
                 println!("    {} {}", indicator, item.label);
             }
         } else {
-            // Plain text — indent each line for readability.
-            for line in body.lines() {
-                println!("    {}", line);
+            // Check for base64-encoded binary content.
+            if response.header("Transfer") == Some("base64") {
+                println!("    (binary content, {} bytes encoded)", body.len());
+            } else {
+                // Plain text — indent each line for readability.
+                for line in body.lines() {
+                    println!("    {}", line);
+                }
             }
         }
     } else {

@@ -5,3 +5,4 @@
 
 pub mod discovery;
 pub mod peers;
+pub mod routing;

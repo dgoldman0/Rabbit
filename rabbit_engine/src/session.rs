@@ -125,6 +125,114 @@ impl SessionManager {
     pub fn has_session(&self, peer_id: &str) -> bool {
         self.sessions.lock().unwrap().contains_key(peer_id)
     }
+
+    /// Return a list of active session peer IDs.
+    pub fn peer_ids(&self) -> Vec<String> {
+        self.sessions.lock().unwrap().keys().cloned().collect()
+    }
+}
+
+/// Saved lane state for session resumption.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedLaneState {
+    /// Lane ID.
+    pub lane_id: u16,
+    /// Last acknowledged outbound sequence number.
+    pub acked_seq: u64,
+    /// Next expected inbound sequence number.
+    pub next_inbound_seq: u64,
+}
+
+/// Saved session state for session resumption.
+#[derive(Debug, Clone)]
+pub struct SavedSessionState {
+    /// Peer ID (session key).
+    pub peer_id: String,
+    /// Session token (from handshake).
+    pub session_token: String,
+    /// Lane states at time of save.
+    pub lanes: Vec<SavedLaneState>,
+}
+
+impl SavedSessionState {
+    /// Serialize session state to TSV format.
+    ///
+    /// Format: `peer_id\tsession_token\tlane_id:acked:next_in,...`
+    pub fn to_tsv(&self) -> String {
+        let lanes_str: Vec<String> = self
+            .lanes
+            .iter()
+            .map(|l| format!("{}:{}:{}", l.lane_id, l.acked_seq, l.next_inbound_seq))
+            .collect();
+        format!(
+            "{}\t{}\t{}",
+            self.peer_id,
+            self.session_token,
+            lanes_str.join(",")
+        )
+    }
+
+    /// Parse session state from a TSV line.
+    pub fn from_tsv(line: &str) -> Option<Self> {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 {
+            return None;
+        }
+        let peer_id = parts[0].to_string();
+        let session_token = parts[1].to_string();
+        let lanes = if parts[2].is_empty() {
+            Vec::new()
+        } else {
+            parts[2]
+                .split(',')
+                .filter_map(|chunk| {
+                    let p: Vec<&str> = chunk.split(':').collect();
+                    if p.len() == 3 {
+                        Some(SavedLaneState {
+                            lane_id: p[0].parse().ok()?,
+                            acked_seq: p[1].parse().ok()?,
+                            next_inbound_seq: p[2].parse().ok()?,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        Some(Self {
+            peer_id,
+            session_token,
+            lanes,
+        })
+    }
+}
+
+/// Save multiple session states to a TSV file.
+pub fn save_session_states(
+    states: &[SavedSessionState],
+    path: &std::path::Path,
+) -> Result<(), std::io::Error> {
+    let content: String = states
+        .iter()
+        .map(|s| s.to_tsv())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, content)
+}
+
+/// Load session states from a TSV file.
+pub fn load_session_states(path: &std::path::Path) -> Vec<SavedSessionState> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => content
+            .lines()
+            .filter(|l| !l.is_empty())
+            .filter_map(SavedSessionState::from_tsv)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 impl Default for SessionManager {

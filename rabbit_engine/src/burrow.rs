@@ -37,6 +37,7 @@ use crate::security::trust::TrustCache;
 use crate::session::SessionManager;
 use crate::transport::tunnel::Tunnel;
 use crate::warren::peers::PeerTable;
+use crate::warren::routing::RoutingTable;
 
 /// Global session counter for unique session IDs.
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -79,6 +80,10 @@ pub struct Burrow {
     pub search_index: SearchIndex,
     /// Interval for periodic OFFER broadcasts in seconds (0 = disabled).
     pub offer_interval_secs: u64,
+    /// Routing table for multi-hop forwarding.
+    pub routing: RoutingTable,
+    /// Saved session states for resumption.
+    pub saved_sessions: std::sync::Mutex<Vec<crate::session::SavedSessionState>>,
 }
 
 impl Burrow {
@@ -173,6 +178,8 @@ impl Burrow {
             retransmit_max_retries: config.network.retransmit_max_retries,
             search_index,
             offer_interval_secs: config.network.offer_interval_secs,
+            routing: RoutingTable::new(),
+            saved_sessions: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -200,6 +207,8 @@ impl Burrow {
             retransmit_max_retries: 3,
             search_index: SearchIndex::build_from_store(&ContentStore::new()),
             offer_interval_secs: 60,
+            routing: RoutingTable::new(),
+            saved_sessions: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -357,6 +366,40 @@ impl Burrow {
                         _ => {}
                     }
 
+                    // ── Hop-Count enforcement for forwarded frames ──
+                    if let Some(target) = frame.header("Target") {
+                        if target != self.identity.burrow_id() {
+                            let hop_count: u32 = frame
+                                .header("Hop-Count")
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(8);
+                            if hop_count == 0 {
+                                let mut err = Frame::new("400 HOP LIMIT");
+                                err.set_body("hop count exceeded");
+                                if let Some(lane) = frame.header("Lane") {
+                                    err.set_header("Lane", lane);
+                                }
+                                tunnel.send_frame(&err).await?;
+                                continue;
+                            }
+                            // Forward to next hop via session manager.
+                            if let Some(next_hop) = self.routing.next_hop(target).await {
+                                let mut fwd = frame.clone();
+                                fwd.set_header("Hop-Count", (hop_count - 1).to_string());
+                                self.sessions.broadcast(vec![(next_hop, fwd)]).await;
+                                continue;
+                            } else {
+                                let mut err = Frame::new("404 NO ROUTE");
+                                err.set_body(format!("no route to {}", target));
+                                if let Some(lane) = frame.header("Lane") {
+                                    err.set_header("Lane", lane);
+                                }
+                                tunnel.send_frame(&err).await?;
+                                continue;
+                            }
+                        }
+                    }
+
                     // ── Normal dispatch ────────────────────────
                     let result: DispatchResult = dispatcher.dispatch(&frame, &peer_id).await;
                     tunnel.send_frame(&result.response).await?;
@@ -493,7 +536,21 @@ impl Burrow {
         } else {
             base_id
         };
-        debug!(peer_id = %peer_id, "handshake complete");
+
+        // ── Session resumption check ───────────────────────
+        let resumed = if let Some(resume_token) = hello.header("Resume") {
+            let saved = self.saved_sessions.lock().unwrap();
+            saved
+                .iter()
+                .any(|s| s.session_token == resume_token && s.peer_id == peer_id)
+        } else {
+            false
+        };
+        if resumed {
+            debug!(peer_id = %peer_id, "session resumed");
+        } else {
+            debug!(peer_id = %peer_id, "handshake complete (fresh session)");
+        }
 
         // ── TOFU trust verification ────────────────────────────
         if let Some(peer_pubkey) = auth.peer_pubkey() {
