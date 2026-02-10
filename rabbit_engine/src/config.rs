@@ -58,6 +58,17 @@ pub struct Config {
     pub network: NetworkConfig,
     /// Content definitions (menus, text, topics).
     pub content: ContentConfig,
+    /// AI configuration (chat connectors).
+    pub ai: AiConfig,
+}
+
+impl AiChatConfig {
+    /// Get the API key from the environment variable.
+    ///
+    /// Returns `None` if `OPENAI_API_KEY` is not set.
+    pub fn api_key(&self) -> Option<String> {
+        std::env::var("OPENAI_API_KEY").ok()
+    }
 }
 
 impl Config {
@@ -232,6 +243,105 @@ pub struct UiConfig {
     pub body: Option<String>,
     /// Path to a JSON file. Resolved relative to the config directory.
     pub file: Option<String>,
+}
+
+/// Top-level AI configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct AiConfig {
+    /// Per-topic AI chat configurations.
+    pub chats: Vec<AiChatConfig>,
+}
+
+/// Configuration for a single AI-powered chat topic.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AiChatConfig {
+    /// The event topic this AI participates in (e.g. `/q/chat`).
+    pub topic: String,
+    /// API provider (currently only `"openai"` is supported).
+    #[serde(default = "default_ai_provider")]
+    pub provider: String,
+    /// Model name (e.g. `"gpt-5-mini"`).
+    #[serde(default = "default_ai_model")]
+    pub model: String,
+    /// API base URL.
+    #[serde(default = "default_ai_api_base")]
+    pub api_base: String,
+    /// System message prepended to every conversation.
+    #[serde(default = "default_ai_system_message")]
+    pub system_message: String,
+    /// Model parameters.
+    #[serde(default)]
+    pub params: AiParamsConfig,
+    /// Command execution settings.
+    #[serde(default)]
+    pub commands: AiCommandConfig,
+}
+
+/// Model parameters for AI chat completion.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AiParamsConfig {
+    /// Sampling temperature (0.0–2.0).
+    pub temperature: f64,
+    /// Maximum tokens in the response.
+    pub max_tokens: u32,
+    /// Nucleus sampling parameter.
+    pub top_p: f64,
+}
+
+impl Default for AiParamsConfig {
+    fn default() -> Self {
+        Self {
+            temperature: 0.7,
+            max_tokens: 2048,
+            top_p: 1.0,
+        }
+    }
+}
+
+/// Command execution settings for AI.
+///
+/// Commands are **disabled by default**.  When enabled, only commands
+/// in the `allowed` list can be executed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AiCommandConfig {
+    /// Whether command execution is enabled at all.
+    pub enabled: bool,
+    /// Explicit allowlist of command names (e.g. `["search", "fetch"]`).
+    pub allowed: Vec<String>,
+    /// Maximum recursive command depth.
+    pub max_depth: u32,
+    /// Per-command timeout in seconds.
+    pub timeout_secs: u64,
+}
+
+impl Default for AiCommandConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allowed: Vec::new(),
+            max_depth: 1,
+            timeout_secs: 10,
+        }
+    }
+}
+
+fn default_ai_provider() -> String {
+    "openai".into()
+}
+
+fn default_ai_model() -> String {
+    "gpt-5-mini".into()
+}
+
+fn default_ai_api_base() -> String {
+    "https://api.openai.com/v1".into()
+}
+
+fn default_ai_system_message() -> String {
+    "You are a helpful assistant inside a Rabbit burrow.".into()
 }
 
 /// An event topic definition in config.
