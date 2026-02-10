@@ -4,3 +4,4 @@
 //! building federated networks of burrows and warrens.
 
 pub mod protocol;
+pub mod security;

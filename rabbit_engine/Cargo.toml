@@ -8,6 +8,11 @@ license = "MIT"
 [dependencies]
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+sha2 = "0.10"
+base32 = "0.5"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+tempfile = "3"
