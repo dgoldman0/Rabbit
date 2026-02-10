@@ -42,6 +42,10 @@ path = "src/bin/rabbit.rs"
 name = "rabbit-warren"
 path = "src/bin/rabbit_warren.rs"
 
+[[bin]]
+name = "rabbit-gui"
+path = "src/bin/rabbit_gui.rs"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"
