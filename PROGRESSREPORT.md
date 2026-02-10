@@ -158,9 +158,48 @@ Tokio features extended: added `net` and `io-util` for TCP and buffered I/O.
 
 ---
 
-## Phase 4: Dispatch, Content, and Events ⬜
+## Phase 4: Dispatch, Content, and Events ✅
 
-**Status:** Not started  
+**Status:** Complete  
+**Commit:** (pending)  
+**Tests added:** 64 (46 unit + 18 integration)  
+**Total tests:** 191
+
+### Modules implemented
+
+| Module | Description |
+|--------|-------------|
+| `dispatch::router` | `Dispatcher` routes incoming frames by verb: LIST→content, FETCH→content, SUBSCRIBE→events, PUBLISH→events, PING→pong, ACK/CREDIT→flow, unknown→400. Returns `DispatchResult` with a primary response and optional extras (e.g. broadcast EVENT frames from publish, replay frames from subscribe). |
+| `content::store` | `ContentStore`: in-memory `HashMap<selector, ContentEntry>`. `ContentEntry` enum: `Menu(Vec<MenuItem>)` or `Text(String)`. `MenuItem` with type_code, label, selector, burrow, hint. Rabbitmap serialization (tab-delimited lines, `.` terminator). Rabbitmap parsing for round-trip fidelity. |
+| `content::handler` | `handle_list()` → 200 MENU with rabbitmap body, `handle_fetch()` → 200 CONTENT with text body. Both echo Lane and Txn headers. Unknown selector → 404 MISSING. |
+| `events::engine` | `EventEngine` with interior mutability (`std::sync::Mutex`). Topic management, subscriber tracking, event logging. `subscribe()` with optional replay from `since_seq`. `publish()` broadcasts EVENT frames to all subscribers. `unsubscribe()`, `replay()`, `load_events()`, `prune()`. |
+| `events::continuity` | `ContinuityStore`: append-only TSV files, one per topic. Format: `seq\ttimestamp\tbody\n`. Newlines/tabs escaped in body. `append()`, `load()`, `replay(since_seq)`, `prune(keep)`. Topic names sanitized for filenames. |
+| `events::handler` | `handle_publish()` and `handle_subscribe()` — thin wrappers that delegate to `EventEngine`. |
+
+### Test counts
+
+- **Unit tests (content::store):** 9 — rabbitmap round-trip, info lines, menu body with terminator, text body, store CRUD, selectors sorted, parse terminator, view types
+- **Unit tests (content::handler):** 6 — LIST menu, LIST missing, FETCH text, FETCH missing, FETCH menu (rabbitmap), Lane/Txn echoed
+- **Unit tests (dispatch::router):** 6 — PING→PONG, unknown verb→400, ACK→OK, CREDIT→OK, LIST missing→404, FETCH missing→404
+- **Unit tests (events::engine):** 14 — subscribe creates topic, publish creates event, broadcast to all subscribers, subscribe with replay, replay all, unsubscribe, unsubscribe nonexistent, replay standalone, replay nonexistent, sequence increment, load from continuity, prune, topics sorted, publish to no subscribers
+- **Unit tests (events::continuity):** 8 — append/load, load nonexistent, replay filter, prune, body with newlines, body with tabs, sanitize names, has_log
+- **Unit tests (events::handler):** 2 — publish broadcast, subscribe with replay
+- **Integration tests (dispatch_tests.rs):** 9 — LIST menu, FETCH text, FETCH missing, PING/PONG, unknown verb, subscribe+publish lifecycle, subscribe with replay, two subscribers both receive, full content round-trip over MemoryTunnel
+- **Integration tests (event_tests.rs):** 9 — full pubsub lifecycle, replay on late subscribe, replay empty topic, continuity persist/reload, continuity replay from seq, continuity prune, special chars in body, engine restore from continuity, multiple topics independent
+- **Phase 1-3 tests:** 127 (unchanged)
+- **Total:** 191
+- **Clippy warnings:** 0
+- **cargo fmt:** Clean
+
+### Key design decisions
+
+1. `Dispatcher` takes `&ContentStore` and `&EventEngine` — no ownership, no tunnel. Pure frame-in → frame-out. The caller handles I/O.
+2. `DispatchResult` separates the primary response from extras (broadcast/replay frames). This lets the caller route broadcast frames to the correct subscriber tunnels without the dispatcher needing tunnel references.
+3. `EventEngine` uses `std::sync::Mutex` for interior mutability so it can be shared via `&self` from the dispatcher. No async mutex needed — operations are fast in-memory.
+4. Rabbitmap format follows the spec exactly: `<type><label>\t<selector>\t<burrow>\t<hint>\r\n` with `.` terminator. `MenuItem::from_rabbitmap_line()` parses back for round-trip testing.
+5. Continuity TSV escapes `\n` and `\t` in event bodies to maintain one-line-per-event invariant. Human-readable. No JSON.
+6. Topic file paths are sanitized (`/q/chat` → `q_chat.log`) for cross-platform safety.
+7. `EventEngine::load_events()` enables restoring state from continuity on startup, with `next_seq` set to max_loaded + 1.
 
 ---
 
