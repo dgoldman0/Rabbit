@@ -17,7 +17,7 @@ use crate::gui::events::{Action, ActionMap};
 use crate::gui::renderer::Renderer;
 use crate::gui::state::{ConnectionStatus, NavStack};
 use crate::gui::theme::{self, Theme};
-use crate::gui::view_gen::{fallback_html, ViewContent, ViewGenerator};
+use crate::gui::view_gen::{fallback_html, DebugLog, ViewContent, ViewGenerator};
 use crate::transport::tunnel::Tunnel;
 
 // ── Static launch data ──────────────────────────────────────────
@@ -130,6 +130,8 @@ fn App() -> Element {
     let mut can_back = use_signal(|| false);
     let mut can_forward = use_signal(|| false);
     let mut current_actions = use_signal(ActionMap::new);
+    let mut debug_visible = use_signal(|| false);
+    let mut debug_log = use_signal(|| DebugLog::default());
 
     // Protocol bridge coroutine.
     let bridge = use_coroutine(move |mut rx: UnboundedReceiver<BridgeCommand>| {
@@ -181,7 +183,7 @@ fn App() -> Element {
                 &mut conn, &current_selector, &theme,
                 &mut html_content, &mut title,
                 &mut status_text, &mut current_actions,
-                &mut view_gen,
+                &mut debug_log, &mut view_gen,
             ).await;
             nav.push(crate::gui::state::NavEntry::new(&current_selector, &host));
             can_back.set(nav.can_go_back());
@@ -199,7 +201,7 @@ fn App() -> Element {
                             &mut conn, &selector, &theme,
                             &mut html_content, &mut title,
                             &mut status_text, &mut current_actions,
-                            &mut view_gen,
+                            &mut debug_log, &mut view_gen,
                         ).await;
                         can_back.set(nav.can_go_back());
                         can_forward.set(nav.can_go_forward());
@@ -211,7 +213,10 @@ fn App() -> Element {
                         match bridge::fetch_selector(&mut conn, &selector).await {
                             Ok(body) => {
                                 let content = ViewContent::Text { selector: selector.clone(), body };
-                                html_content.set(fallback_html(&content, &theme));
+                                html_content.set(
+                                    render_content(&mut view_gen, &content, &theme,
+                                        &mut status_text, &mut debug_log).await
+                                );
                                 current_actions.set(ActionMap::for_text_view());
                                 title.set(selector.clone());
                                 status_text.set(format!("Viewing {}", selector));
@@ -264,7 +269,7 @@ fn App() -> Element {
                                     &mut conn, &sel, &theme,
                                     &mut html_content, &mut title,
                                     &mut status_text, &mut current_actions,
-                                    &mut view_gen,
+                                    &mut debug_log, &mut view_gen,
                                 ).await;
                             }
                             can_back.set(nav.can_go_back());
@@ -284,7 +289,7 @@ fn App() -> Element {
                                     &mut conn, &sel, &theme,
                                     &mut html_content, &mut title,
                                     &mut status_text, &mut current_actions,
-                                    &mut view_gen,
+                                    &mut debug_log, &mut view_gen,
                                 ).await;
                             }
                             can_back.set(nav.can_go_back());
@@ -292,6 +297,10 @@ fn App() -> Element {
                         }
                     }
                     BridgeCommand::Refresh => {
+                        // Clear cache on refresh so AI regenerates.
+                        if let Some(gen) = view_gen.as_mut() {
+                            gen.clear_cache();
+                        }
                         html_content.set(fallback_html(
                             &ViewContent::Loading { selector: current_selector.clone() }, &theme));
                         status_text.set("Refreshing\u{2026}".into());
@@ -299,7 +308,7 @@ fn App() -> Element {
                                     &mut conn, &current_selector, &theme,
                                     &mut html_content, &mut title,
                                     &mut status_text, &mut current_actions,
-                                    &mut view_gen,
+                                    &mut debug_log, &mut view_gen,
                                 ).await;
                     }
                 }
@@ -364,6 +373,7 @@ fn App() -> Element {
         match key.as_str() {
             "Escape" | "Backspace" => bridge_for_keys.send(BridgeCommand::Back),
             "F5" => bridge_for_keys.send(BridgeCommand::Refresh),
+            "F12" => debug_visible.set(!debug_visible()),
             _ => {}
         }
     };
@@ -393,11 +403,21 @@ fn App() -> Element {
                     "\u{21BB}"
                 }
                 span { class: "title", "{title}" }
+                button {
+                    class: if debug_visible() { "debug-btn active" } else { "debug-btn" },
+                    onclick: move |_| debug_visible.set(!debug_visible()),
+                    title: "Toggle debug panel (F12)",
+                    "\u{1F41B}"
+                }
             }
 
             div {
                 class: "content",
                 div { dangerous_inner_html: "{html_content}" }
+            }
+
+            if debug_visible() {
+                {render_debug_panel(&debug_log.read())}
             }
 
             div { class: "status-bar",
@@ -409,26 +429,100 @@ fn App() -> Element {
 
 // ── Bridge helpers ─────────────────────────────────────────────
 
+/// Extract the most recent HTML tag from a streaming token.
+///
+/// Scans for `<tagname` patterns in the accumulated text and returns
+/// the last one found, so the status bar can show progress like
+/// `<html> → <body> → <nav> → <h1>…`
+fn extract_last_tag(accumulated: &str) -> Option<String> {
+    // Walk backwards to find the last '<' that starts a tag.
+    let bytes = accumulated.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 {
+        i -= 1;
+        if bytes[i] == b'<' && i + 1 < bytes.len() && bytes[i + 1] != b'/' {
+            // Found opening tag start.  Extract up to space or >.
+            let rest = &accumulated[i..];
+            let end = rest.find(|c: char| c == ' ' || c == '>' || c == '\n')
+                .unwrap_or(rest.len().min(30));
+            let tag = &rest[..end];
+            if tag.len() > 1 {
+                return Some(format!("{}>", tag.trim_end_matches('>')));
+            }
+        }
+    }
+    None
+}
+
+/// Render the debug panel as an Element.
+fn render_debug_panel(dbg: &DebugLog) -> Element {
+    let cache_badge = if dbg.cache_hit {
+        "\u{2705} CACHE HIT"
+    } else {
+        "\u{274C} CACHE MISS"
+    };
+
+    let mode_str = match dbg.mode.as_str() {
+        "diff" => format!("DIFF ({}/{} patches applied)", dbg.patches_applied, dbg.patches_total),
+        "full" => "FULL (streamed)".to_string(),
+        "cached" => "CACHED (instant)".to_string(),
+        _ => "—".to_string(),
+    };
+
+    // Truncate long strings for display.
+    let prompt_preview = if dbg.user_prompt.len() > 2000 {
+        format!("{}…", &dbg.user_prompt[..2000])
+    } else {
+        dbg.user_prompt.clone()
+    };
+
+    let response_preview = if dbg.ai_response.len() > 2000 {
+        format!("{}…", &dbg.ai_response[..2000])
+    } else {
+        dbg.ai_response.clone()
+    };
+
+    let prompt_escaped = crate::gui::view_gen::html_escape(&prompt_preview);
+    let response_escaped = crate::gui::view_gen::html_escape(&response_preview);
+
+    let debug_html = format!(
+        "<div style=\"background:#111;color:#0f0;font-family:monospace;font-size:12px;\
+         padding:12px;max-height:40vh;overflow-y:auto;border-top:2px solid #6366f1;\">\
+         <div style=\"margin-bottom:8px;\"><strong>{cache_badge}</strong> &nbsp; \
+         Mode: <strong>{mode_str}</strong></div>\
+         <details><summary style=\"cursor:pointer;color:#6366f1;\">User Prompt</summary>\
+         <pre style=\"white-space:pre-wrap;color:#aaa;margin:4px 0;\">{prompt_escaped}</pre></details>\
+         <details><summary style=\"cursor:pointer;color:#6366f1;\">AI Response</summary>\
+         <pre style=\"white-space:pre-wrap;color:#aaa;margin:4px 0;\">{response_escaped}</pre></details>\
+         </div>"
+    );
+
+    rsx! {
+        div { class: "debug-panel", dangerous_inner_html: "{debug_html}" }
+    }
+}
+
 /// Try AI rendering first; fall back to static HTML on failure.
 ///
-/// Streams tokens from the API and updates the status bar live as
-/// each chunk arrives.
+/// Streams tokens from the API and updates the status bar live,
+/// showing each HTML tag as it arrives.
 async fn render_content(
     view_gen: &mut Option<ViewGenerator>,
     content: &ViewContent,
     theme: &str,
     status_signal: &mut Signal<String>,
+    debug_signal: &mut Signal<DebugLog>,
 ) -> String {
     if let Some(gen) = view_gen.as_mut() {
         let model = gen.model_name().to_string();
         let has_cache = gen.cache_size() > 0;
         let mode = if has_cache { "diff" } else { "full" };
-        status_signal.set(format!("{model} \u{25B8} {mode} 0 tokens"));
+        status_signal.set(format!("{model} \u{25B8} {mode}"));
 
         // Create a channel for streaming progress.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
 
-        // Spawn the generation — we'll poll it alongside the progress
+        // Spawn the generation — we poll it alongside the progress
         // channel so we can update the status bar in real time.
         let gen_ptr = gen as *mut ViewGenerator;
         // SAFETY: we await the future in the same scope, gen outlives it.
@@ -437,19 +531,30 @@ async fn render_content(
             gen_ref.generate(content, theme, &tx)
         );
 
-        let mut token_count: usize = 0;
+        let mut accumulated = String::new();
         let result = loop {
             tokio::select! {
                 biased;
                 Some(tok) = rx.recv() => {
-                    // Count whitespace-delimited tokens approximately.
-                    token_count += tok.split_whitespace().count().max(1);
-                    status_signal.set(format!("{model} \u{25B8} {mode} {token_count} tokens"));
+                    // Check for patch progress signals (prefixed with \0).
+                    if tok.starts_with('\0') {
+                        // Patch progress: "\x00PATCH 2/5"
+                        let info = tok.trim_start_matches('\0');
+                        status_signal.set(format!("{model} \u{25B8} {info}"));
+                    } else {
+                        accumulated.push_str(&tok);
+                        // Show the last HTML tag we've seen.
+                        if let Some(tag) = extract_last_tag(&accumulated) {
+                            status_signal.set(format!("{model} \u{25B8} {mode} {tag}"));
+                        }
+                    }
                 }
                 res = &mut gen_fut => {
-                    // Drain remaining tokens from channel.
+                    // Drain remaining.
                     while let Ok(tok) = rx.try_recv() {
-                        token_count += tok.split_whitespace().count().max(1);
+                        if !tok.starts_with('\0') {
+                            accumulated.push_str(&tok);
+                        }
                     }
                     break res;
                 }
@@ -457,13 +562,23 @@ async fn render_content(
         };
 
         match result {
-            Ok(html) => {
-                status_signal.set(format!("{model} \u{25B8} done ({token_count} tokens)"));
+            Ok((html, dbg)) => {
+                let summary = match dbg.mode.as_str() {
+                    "cached" => format!("{model} \u{25B8} cached (instant)"),
+                    "diff" => format!("{model} \u{25B8} diff {}/{} patches", dbg.patches_applied, dbg.patches_total),
+                    _ => format!("{model} \u{25B8} done"),
+                };
+                status_signal.set(summary);
+                debug_signal.set(dbg);
                 return html;
             }
             Err(e) => {
                 eprintln!("rabbit-gui: AI render failed ({}), using fallback", e);
-                status_signal.set(format!("AI failed, using fallback: {}", e));
+                status_signal.set(format!("AI failed: {}", e));
+                let mut dbg = DebugLog::default();
+                dbg.mode = "error".into();
+                dbg.ai_response = format!("{}", e);
+                debug_signal.set(dbg);
             }
         }
     }
@@ -478,6 +593,7 @@ async fn fetch_and_render(
     title_signal: &mut Signal<String>,
     status_signal: &mut Signal<String>,
     actions_signal: &mut Signal<ActionMap>,
+    debug_signal: &mut Signal<DebugLog>,
     view_gen: &mut Option<ViewGenerator>,
 ) {
     match bridge::list_selector(conn, selector).await {
@@ -486,7 +602,7 @@ async fn fetch_and_render(
                 selector: selector.to_string(),
                 items: items.clone(),
             };
-            html_signal.set(render_content(view_gen, &content, theme, status_signal).await);
+            html_signal.set(render_content(view_gen, &content, theme, status_signal, debug_signal).await);
             actions_signal.set(ActionMap::from_menu(&items));
             title_signal.set(selector.to_string());
             status_signal.set(format!("Viewing {}", selector));
@@ -495,7 +611,7 @@ async fn fetch_and_render(
             match bridge::fetch_selector(conn, selector).await {
                 Ok(body) => {
                     let content = ViewContent::Text { selector: selector.to_string(), body };
-                    html_signal.set(render_content(view_gen, &content, theme, status_signal).await);
+                    html_signal.set(render_content(view_gen, &content, theme, status_signal, debug_signal).await);
                     actions_signal.set(ActionMap::for_text_view());
                     title_signal.set(selector.to_string());
                     status_signal.set(format!("Viewing {}", selector));
@@ -560,5 +676,15 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn extract_last_tag_finds_tags() {
+        assert_eq!(extract_last_tag("<html><head>"), Some("<head>".into()));
+        assert_eq!(extract_last_tag("<html><body><h1>Hello"), Some("<h1>".into()));
+        assert_eq!(extract_last_tag("no tags here"), None);
+        assert_eq!(extract_last_tag("<div class=\"foo\">text"), Some("<div>".into()));
+        // Closing tags are ignored (starts with </).
+        assert_eq!(extract_last_tag("<p>text</p>"), Some("<p>".into()));
     }
 }

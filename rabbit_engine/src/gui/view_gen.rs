@@ -19,6 +19,23 @@ use crate::content::store::MenuItem;
 /// Channel sender for streaming progress tokens.
 pub type ProgressTx = tokio::sync::mpsc::Sender<String>;
 
+/// Debug log captured during a generate() call.
+#[derive(Debug, Clone, Default)]
+pub struct DebugLog {
+    /// Whether this was a cache hit.
+    pub cache_hit: bool,
+    /// "full", "diff", or "cached".
+    pub mode: String,
+    /// The user prompt sent to the AI (empty on cache hit).
+    pub user_prompt: String,
+    /// The raw AI response (empty on cache hit).
+    pub ai_response: String,
+    /// Number of patches applied (diff mode only).
+    pub patches_applied: usize,
+    /// Total patches attempted (diff mode only).
+    pub patches_total: usize,
+}
+
 // ── Content descriptions fed to the prompt builder ─────────────
 
 /// A piece of burrow content to be rendered.
@@ -147,8 +164,10 @@ pub struct ViewGenerator {
     tls: Arc<ClientConfig>,
     /// AI renderer configuration.
     config: AiRendererConfig,
-    /// Content-hash → HTML cache.
+    /// Content-hash → HTML cache (exact match).
     cache: HashMap<String, String>,
+    /// Content-type → most recent HTML (for diff base).
+    type_cache: HashMap<String, String>,
 }
 
 impl ViewGenerator {
@@ -158,6 +177,7 @@ impl ViewGenerator {
             tls,
             config,
             cache: HashMap::new(),
+            type_cache: HashMap::new(),
         }
     }
 
@@ -165,66 +185,80 @@ impl ViewGenerator {
     ///
     /// **Cache HIT** — returns immediately, zero API calls.
     ///
-    /// **Cache MISS + prior HTML exists** — asks the AI to produce
-    /// ONLY a JSON diff `[{"find":"…","replace":"…"}, …]` which is
-    /// applied to the cached HTML.  Much smaller/faster response.
+    /// **Cache MISS + prior HTML for same content type** — DIFF mode:
+    /// asks the AI to produce ONLY a JSON diff which is applied to
+    /// the cached HTML.  Much smaller/faster response.
     ///
-    /// **Cache MISS + no prior HTML** — full generation (streamed).
+    /// **Cache MISS + no prior HTML** — FULL mode (streamed).
     ///
     /// Tokens are sent through `progress` as they arrive so the UI
-    /// can show live progress.
+    /// can show live progress.  Returns `(html, debug_log)`.
     pub async fn generate(
         &mut self,
         content: &ViewContent,
         theme: &str,
         progress: &ProgressTx,
-    ) -> Result<String, AiHttpError> {
+    ) -> Result<(String, DebugLog), AiHttpError> {
         let content_key = content_cache_key(content, theme);
+        let mut dbg = DebugLog::default();
 
         // ── Cache HIT → instant return ──────────────────────────
         if self.config.cache_views {
             if let Some(cached) = self.cache.get(&content_key) {
                 eprintln!("rabbit-gui: cache HIT for {} ({})",
                     content_label(content), &content_key[..12]);
-                return Ok(cached.clone());
+                dbg.cache_hit = true;
+                dbg.mode = "cached".into();
+                return Ok((cached.clone(), dbg));
             }
             eprintln!("rabbit-gui: cache MISS for {} ({}) — calling {}",
                 content_label(content), &content_key[..12], self.config.model);
         }
 
-        // Find previous HTML for same content *type*.
-        let previous_html: Option<String> = self.cache.iter()
-            .find(|(_, _)| true) // any entry works as layout reference
-            .map(|(_, v)| v.clone());
+        // Find previous HTML for the same content *type* only.
+        let type_label = content_label(content);
+        let previous_html: Option<String> = self.type_cache
+            .get(type_label)
+            .cloned();
 
         let api_key = std::env::var("OPENAI_API_KEY")
             .map_err(|_| AiHttpError::MissingApiKey)?;
 
         let prompt = build_prompt(content, theme);
+        dbg.user_prompt = prompt.clone();
 
-        let html = if let Some(ref base_html) = previous_html {
-            // ── DIFF mode ───────────────────────────────────────
-            self.generate_diff(base_html, &prompt, &api_key, progress).await?
-        } else {
-            // ── FULL mode (streamed) ────────────────────────────
-            self.generate_full(&prompt, &api_key, progress).await?
-        };
+        let (html, raw_response, patches_applied, patches_total) =
+            if let Some(ref base_html) = previous_html {
+                dbg.mode = "diff".into();
+                self.generate_diff(base_html, &prompt, &api_key, progress).await?
+            } else {
+                dbg.mode = "full".into();
+                let (h, raw) = self.generate_full(&prompt, &api_key, progress).await?;
+                (h, raw, 0, 0)
+            };
+
+        dbg.ai_response = raw_response;
+        dbg.patches_applied = patches_applied;
+        dbg.patches_total = patches_total;
 
         // Cache the result.
         if self.config.cache_views {
             self.cache.insert(content_key, html.clone());
+            // Also store by type for future diff base lookups.
+            self.type_cache.insert(type_label.to_string(), html.clone());
         }
 
-        Ok(html)
+        Ok((html, dbg))
     }
 
     /// Full HTML generation via streaming SSE.
+    /// Returns (final_html, raw_response).
     async fn generate_full(
         &self,
         prompt: &str,
         api_key: &str,
         progress: &ProgressTx,
-    ) -> Result<String, AiHttpError> {
+    ) -> Result<(String, String), AiHttpError> {
         let messages = vec![
             AiMessage::system(&self.config.system_message),
             AiMessage::user(prompt),
@@ -241,21 +275,21 @@ impl ViewGenerator {
         };
 
         let raw = http::chat_completion_streaming_with_retry(&req, progress, 2).await?;
-        Ok(strip_markdown_fences(&raw))
+        let html = strip_markdown_fences(&raw);
+        Ok((html, raw))
     }
 
     /// Diff-based generation: AI produces ONLY a JSON patch array,
     /// which is applied to `base_html` to produce the final result.
     ///
-    /// Patch format: `[{"find": "old text", "replace": "new text"}, ...]`
-    /// An empty array `[]` means no changes needed.
+    /// Returns (final_html, raw_response, patches_applied, patches_total).
     async fn generate_diff(
         &self,
         base_html: &str,
         prompt: &str,
         api_key: &str,
         progress: &ProgressTx,
-    ) -> Result<String, AiHttpError> {
+    ) -> Result<(String, String, usize, usize), AiHttpError> {
         // Cap the base HTML we send to ~6KB to stay within token budget.
         let cap = 6144.min(base_html.len());
         let base_snippet = &base_html[..cap];
@@ -290,21 +324,21 @@ impl ViewGenerator {
         };
 
         let raw = http::chat_completion_streaming_with_retry(&req, progress, 2).await?;
-        let raw = strip_markdown_fences(&raw);
+        let cleaned = strip_markdown_fences(&raw);
 
         // Parse the JSON patch array.
-        let patches = parse_patches(&raw);
+        let patches = parse_patches(&cleaned);
+        let total = patches.len();
 
         if patches.is_empty() {
-            // No changes — return base as-is.
             eprintln!("rabbit-gui: diff returned 0 patches, using base HTML");
-            return Ok(base_html.to_string());
+            return Ok((base_html.to_string(), raw, 0, 0));
         }
 
         // Apply patches to base HTML.
         let mut result = base_html.to_string();
         let mut applied = 0;
-        for patch in &patches {
+        for (i, patch) in patches.iter().enumerate() {
             if let Some(pos) = result.find(&patch.find) {
                 result = format!(
                     "{}{}{}",
@@ -313,29 +347,31 @@ impl ViewGenerator {
                     &result[pos + patch.find.len()..]
                 );
                 applied += 1;
+                // Report patch progress.
+                let _ = progress.try_send(format!("\x00PATCH {}/{}", i + 1, total));
             } else {
                 eprintln!("rabbit-gui: patch find not matched: {:?}",
                     &patch.find[..patch.find.len().min(60)]);
             }
         }
 
-        eprintln!("rabbit-gui: applied {}/{} patches", applied, patches.len());
+        eprintln!("rabbit-gui: applied {}/{} patches", applied, total);
 
-        // If zero patches applied, the AI probably returned garbage —
-        // fall back to full generation.
+        // If zero patches applied, fall back to full generation.
         if applied == 0 {
             eprintln!("rabbit-gui: diff failed, falling back to full generation");
-            return self.generate_full(&build_prompt_from_raw(
-                &strip_markdown_fences(&raw), ""), api_key, progress).await
-                .or_else(|_| Ok(base_html.to_string()));
+            let (fallback_html, fallback_raw) = self.generate_full(prompt, api_key, progress).await
+                .unwrap_or_else(|_| (base_html.to_string(), String::new()));
+            return Ok((fallback_html, fallback_raw, 0, 0));
         }
 
-        Ok(result)
+        Ok((result, raw, applied, total))
     }
 
     /// Clear the view cache.
     pub fn clear_cache(&mut self) {
         self.cache.clear();
+        self.type_cache.clear();
     }
 
     /// Number of cached views.
@@ -541,12 +577,6 @@ fn parse_patches(json_str: &str) -> Vec<Patch> {
         if find.is_empty() { return None; }
         Some(Patch { find, replace })
     }).collect()
-}
-
-/// Passthrough helper — when diff fails and we want to try full gen
-/// but already consumed the prompt, just return the text as-is.
-fn build_prompt_from_raw(text: &str, _theme: &str) -> String {
-    text.to_string()
 }
 
 /// Strip markdown code fences from AI output.
