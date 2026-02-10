@@ -1,0 +1,74 @@
+# Community Burrow — Demo Configuration
+# Focus on chat and community features
+
+[identity]
+name = "community-space"
+require_auth = false
+
+[network]
+port = 7445
+
+# GUI configuration
+[gui]
+enabled = true
+renderer = "webview"
+window_width = 1024
+window_height = 768
+theme = "system"
+
+[[content.menus]]
+selector = "/"
+items = [
+    { type = "i", label = "👥 Community Space" },
+    { type = "i", label = "" },
+    { type = "q", label = "💬 General Chat", selector = "/q/general" },
+    { type = "q", label = "📢 Announcements", selector = "/q/announcements" },
+    { type = "1", label = "🌐 Warren Directory", selector = "/warren" },
+    { type = "0", label = "ℹ️  Community Guidelines", selector = "/0/guidelines" },
+]
+
+[[content.text]]
+selector = "/0/guidelines"
+body = """
+👥 Community Space Guidelines
+
+This burrow demonstrates the pub/sub event system.
+
+Event Topics (type q):
+• Messages are published to topics
+• Subscribers receive events in real-time
+• Continuity engine provides replay
+• Subscribe with 'Since' to get history
+
+Try these commands:
+
+Terminal:
+  rabbit sub 127.0.0.1:7445 /q/general
+  
+GUI:
+  rabbit-gui 127.0.0.1:7445
+  (navigate to General Chat)
+
+The event system supports:
+- Real-time message delivery
+- Persistent replay from sequence numbers
+- Fan-out to multiple subscribers
+- QoS modes (stream vs event)
+
+All events are stored in the continuity engine
+so new subscribers can catch up on history.
+"""
+
+# Community chat topics
+[[content.topics]]
+path = "/q/general"
+
+[[content.topics]]
+path = "/q/announcements"
+
+# Note: AI chat can be enabled here too
+# Just uncomment and set OPENAI_API_KEY
+# [[ai.chats]]
+# topic = "/q/general"
+# model = "gpt-4o-mini"
+# system_message = "You are a friendly community moderator..."

@@ -1,0 +1,138 @@
+# Content Burrow — Demo Configuration
+# This burrow serves various content types
+
+[identity]
+name = "content-hub"
+require_auth = false
+
+[network]
+port = 7444
+
+# GUI configuration
+[gui]
+enabled = true
+renderer = "webview"
+theme = "light"
+
+[[content.menus]]
+selector = "/"
+items = [
+    { type = "i", label = "📦 Content Hub" },
+    { type = "i", label = "" },
+    { type = "1", label = "Warren Directory", selector = "/warren" },
+    { type = "1", label = "Examples", selector = "/1/examples" },
+    { type = "7", label = "Search", selector = "/7/search" },
+    { type = "0", label = "About", selector = "/0/about" },
+]
+
+[[content.menus]]
+selector = "/1/examples"
+items = [
+    { type = "i", label = "📋 Example Content" },
+    { type = "i", label = "" },
+    { type = "0", label = "Text Document", selector = "/0/example-text" },
+    { type = "0", label = "Markdown Guide", selector = "/0/markdown" },
+    { type = "0", label = "Code Sample", selector = "/0/code-sample" },
+    { type = "q", label = "Event Stream Demo", selector = "/q/demo-events" },
+    { type = "1", label = "← Back", selector = "/" },
+]
+
+[[content.text]]
+selector = "/0/about"
+body = """
+📦 Content Hub
+
+This burrow demonstrates different content types:
+
+• Plain text pages
+• Search functionality (type 7)
+• Event streams (type q)
+• Warren directory integration
+
+Browse /1/examples to see various content formats.
+"""
+
+[[content.text]]
+selector = "/0/example-text"
+body = """
+Example Text Document
+
+This is a simple text page served via the Rabbit protocol.
+
+The protocol supports:
+- Menu listings (type 1)
+- Text pages (type 0)
+- Binary content (type 9)
+- Event streams (type q)
+- Search endpoints (type 7)
+- UI declarations (type u)
+
+Each resource has a selector (like a path) and content
+is served on demand via FETCH requests.
+"""
+
+[[content.text]]
+selector = "/0/markdown"
+body = """
+# Markdown Formatting Guide
+
+While Rabbit protocol itself is plain text, AI renderers
+can interpret markdown formatting:
+
+## Text Formatting
+- **bold** with double asterisks
+- *italic* with single asterisks
+- `code` with backticks
+
+## Lists
+1. Numbered lists
+2. Work great
+3. For sequences
+
+• Bullet points
+• For unordered items
+
+## Code Blocks
+```rust
+fn main() {
+    println!("Hello, Rabbit!");
+}
+```
+
+The AI view generator can turn these into styled HTML!
+"""
+
+[[content.text]]
+selector = "/0/code-sample"
+body = """
+// Example Rust code: Fetching from a Rabbit burrow
+
+use rabbit_engine::protocol::frame::Frame;
+use rabbit_engine::transport::connector::connect;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Connect to burrow
+    let mut tunnel = connect(
+        "127.0.0.1:7443",
+        client_config,
+        "localhost"
+    ).await?;
+    
+    // Send FETCH request
+    let request = Frame::build_request("FETCH", "/0/readme")
+        .with_header("Lane", "L0")
+        .with_header("Txn", "T-1");
+    
+    tunnel.send_frame(&request).await?;
+    
+    // Receive response
+    let response = tunnel.recv_frame().await?;
+    println!("Body: {}", response.body);
+    
+    Ok(())
+}
+"""
+
+[[content.topics]]
+path = "/q/demo-events"
