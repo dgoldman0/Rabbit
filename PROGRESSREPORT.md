@@ -203,9 +203,63 @@ Tokio features extended: added `net` and `io-util` for TCP and buffered I/O.
 
 ---
 
-## Phase 5: Burrow Assembly and Warren ⬜
+## Phase 5: Burrow Assembly and Warren ✅
 
-**Status:** Not started  
+**Status:** Complete  
+**Tests added:** 42 (34 unit + 8 integration)  
+**Total tests:** 233
+
+### Modules implemented
+
+| Module | Description |
+|--------|-------------|
+| `config` | TOML-based configuration via `serde` (config-only — never wire protocol). `Config` struct with `IdentityConfig`, `NetworkConfig`, `ContentConfig` sections. `ContentConfig` supports `[[content.menus]]` with items, `[[content.text]]` with `body` (inline) or `file` (path reference), `[[content.topics]]` for event topics. `Config::load(path)` reads TOML file; `Config::parse(str)` parses TOML string. Missing file → default config. |
+| `content::loader` | `load_content(config, base_dir) -> ContentStore` — builds a fully populated `ContentStore` from config declarations. File paths are resolved relative to `base_dir`. Inline `body` takes precedence over `file`. Missing file/body produces a clear error. |
+| `warren::peers` | `PeerTable` — async-safe (`tokio::sync::Mutex`) peer registry. `PeerInfo` struct with id, address, name, last_seen, connected. Methods: `register`, `remove`, `get`, `list`, `count`, `mark_connected`, `mark_disconnected`. |
+| `warren::discovery` | `warren_menu(table) -> Vec<MenuItem>` — dynamically builds a menu from the peer table. Connected peers → type `1` entries (navigable). Offline peers → type `i` entries (info). Empty warren → "No peers" info line. |
+| `burrow` | `Burrow` struct owns all subsystems: Identity, ContentStore, EventEngine, ContinuityStore, TrustCache, CapabilityManager, PeerTable. `Burrow::from_config(config, base_dir)` — generates/loads identity key, loads content from TOML, initializes all subsystems. `Burrow::in_memory(name)` — minimal test constructor. `handle_tunnel(tunnel)` — full server-side protocol loop (HELLO/CHALLENGE/AUTH handshake → frame dispatch → clean close). `client_handshake(tunnel)` — client-side handshake helper. `dispatcher()` — creates a Dispatcher from owned content/events. |
+| `security::identity` (extended) | Added `seed_bytes()` and `from_bytes(pubkey, seed)` to allow identity reconstruction for the Authenticator inside `Burrow::handle_tunnel`. |
+
+### Dependencies added
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `serde` | 1 (with `derive` feature) | TOML config deserialization only — never used for wire protocol |
+| `toml` | 0.8 | TOML file parsing |
+
+### Test counts
+
+- **Unit tests (config):** 6 — default config, parse full, parse minimal, parse empty, menu with remote burrow, load missing file
+- **Unit tests (content::loader):** 9 — load empty, inline text, file-backed text, menu, body wins over file, missing body/file error, missing file error, mixed content, remote burrow reference
+- **Unit tests (warren::peers):** 6 — register/get, list, remove, mark connected/disconnected, get missing, register updates
+- **Unit tests (warren::discovery):** 4 — empty warren, connected peer, disconnected peer, mixed peers
+- **Unit tests (burrow):** 9 — in_memory, from_config creates identity, from_config reloads identity, from_config loads content, dispatcher routes list, handle_tunnel anonymous, handle_tunnel with auth, handle_tunnel list+fetch, handle_tunnel pub/sub
+- **Integration tests (warren_tests.rs):** 8 — burrow from TOML config, identity persists across restarts, two-burrow content exchange, two-burrow authenticated, three-burrow warren, warren discovery menu, pubsub across tunnel, config-loaded burrow serves over tunnel
+- **Phase 1-4 tests:** 191 (unchanged)
+- **Total:** 233
+- **Clippy warnings:** 0
+- **cargo fmt:** Clean
+
+### Key design decisions
+
+1. **Serde for config only.** PLAN.md excluded serde from the wire protocol (correctly), but TOML parsing requires serde for deserialization. `serde` + `toml` are used exclusively for `Config` structs — all protocol frames remain hand-parsed text with CRLF + `End:` termination.
+2. **File-backed content.** `[[content.text]]` entries support `file = "path/to/file.txt"` with paths resolved relative to the config's base directory. This lets operators assemble a burrow from existing content files.
+3. **Inline body wins.** If both `body` and `file` are present, `body` takes precedence — defensive default, avoids I/O surprises.
+4. **Identity persistence.** `Burrow::from_config` saves the Ed25519 seed to `<storage>/identity.key` on first run and reloads it on subsequent runs, keeping a stable burrow ID across restarts.
+5. **handle_tunnel is purely frame-driven.** The Burrow doesn't spawn tasks or manage tunnel lifecycle — it runs a synchronous dispatch loop on whatever tunnel the caller provides. This makes it testable with MemoryTunnel and deployable with TlsTunnel identically.
+6. **client_handshake handles both auth paths.** The client sends HELLO, then checks whether the server responded with `300 CHALLENGE` (auth required) or `200 HELLO` (anonymous). Both paths return the server's burrow ID.
+7. **PeerTable uses tokio::sync::Mutex.** Warren peer registration may happen from multiple tasks, so the async mutex matches the transport layer's concurrency model.
+
+### Issues encountered and resolved
+
+- `recv_frame()` returns `Result<Option<Frame>>`, not `Result<Frame>` — fixed all call sites to unwrap the `Option` (closed tunnel returns `None`).
+- `Frame::new("300 CHALLENGE")` splits into verb `"300"` + args `["CHALLENGE"]`, so client handshake compares `response.verb == "300"` not `"300 CHALLENGE"`.
+- Anonymous path sets `Burrow-ID: anonymous` in the server response, not the server's ed25519 ID — test updated accordingly.
+- `SUBSCRIBE` returns `201 SUBSCRIBED` and `PUBLISH` returns `204 DONE` — not `200` — test assertions fixed.
+- `Tunnel` trait must be imported in integration tests (`use rabbit_engine::transport::tunnel::Tunnel;`) for method resolution on `MemoryTunnel`.
+- clippy `derivable_impls` warning for `Config::default()` — switched to `#[derive(Default)]`.
+- clippy `should_implement_trait` for `from_str` — renamed to `Config::parse()`.
+- clippy `redundant_closure` — replaced `.map(|item| f(item))` with `.map(f)`.
 
 ---
 

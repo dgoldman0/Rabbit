@@ -64,6 +64,20 @@ impl Identity {
         self.signing_key.verifying_key()
     }
 
+    /// Return the raw 32-byte seed (secret key material).
+    pub fn seed_bytes(&self) -> [u8; 32] {
+        self.signing_key.to_bytes()
+    }
+
+    /// Reconstruct an identity from the public key and seed bytes.
+    ///
+    /// The `_pubkey` parameter is accepted for API symmetry but the
+    /// signing key is derived solely from `seed`.
+    pub fn from_bytes(_pubkey: [u8; 32], seed: [u8; 32]) -> Result<Self, ProtocolError> {
+        let signing_key = SigningKey::from_bytes(&seed);
+        Ok(Self { signing_key })
+    }
+
     /// Return the raw public key bytes (32 bytes).
     pub fn public_key_bytes(&self) -> [u8; 32] {
         self.verifying_key().to_bytes()

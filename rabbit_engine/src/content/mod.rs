@@ -6,4 +6,5 @@
 //! [`handle_fetch`](handler::handle_fetch) functions.
 
 pub mod handler;
+pub mod loader;
 pub mod store;
