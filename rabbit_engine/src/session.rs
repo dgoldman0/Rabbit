@@ -70,7 +70,7 @@ impl SessionManager {
     /// old writer task to terminate).
     pub fn register(&self, peer_id: &str, buffer: usize) -> mpsc::Receiver<Frame> {
         let (tx, rx) = mpsc::channel(buffer);
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if sessions.contains_key(peer_id) {
             debug!(peer_id = %peer_id, "replacing existing session");
         }
@@ -84,7 +84,7 @@ impl SessionManager {
     /// Drops the sender channel, which signals the writer task to
     /// shut down.
     pub fn unregister(&self, peer_id: &str) {
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         if sessions.remove(peer_id).is_some() {
             debug!(peer_id = %peer_id, count = sessions.len(), "session unregistered");
         }
@@ -98,7 +98,7 @@ impl SessionManager {
     /// slow or has disconnected).
     pub async fn broadcast(&self, frames: Vec<(String, Frame)>) {
         // Collect frames by peer to minimize lock holds.
-        let sessions = self.sessions.lock().unwrap();
+        let sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let mut sends = Vec::new();
         for (peer_id, frame) in frames {
             if let Some(session) = sessions.get(&peer_id) {
@@ -118,17 +118,28 @@ impl SessionManager {
 
     /// Return the number of active sessions.
     pub fn session_count(&self) -> usize {
-        self.sessions.lock().unwrap().len()
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     /// Check whether a session is registered for the given peer.
     pub fn has_session(&self, peer_id: &str) -> bool {
-        self.sessions.lock().unwrap().contains_key(peer_id)
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(peer_id)
     }
 
     /// Return a list of active session peer IDs.
     pub fn peer_ids(&self) -> Vec<String> {
-        self.sessions.lock().unwrap().keys().cloned().collect()
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 }
 
