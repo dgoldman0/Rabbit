@@ -127,6 +127,16 @@ pub struct NetworkConfig {
     pub retransmit_max_retries: u32,
     /// Interval for periodic OFFER broadcasts in seconds (0 = disabled, default 60).
     pub offer_interval_secs: u64,
+    /// Maximum frames per second per peer (0 = unlimited, default 100).
+    pub rate_limit_fps: u32,
+    /// Maximum PUBLISH frames per second per peer (0 = unlimited, default 10).
+    pub publish_rate_limit_fps: u32,
+    /// Maximum concurrent tunnels per burrow (0 = unlimited, default 64).
+    pub max_connections: u32,
+    /// Maximum concurrent tunnels from the same peer (0 = unlimited, default 4).
+    pub max_per_peer: u32,
+    /// Idempotency token cache TTL in seconds (default 60).
+    pub idem_ttl_secs: u64,
 }
 
 impl Default for NetworkConfig {
@@ -140,6 +150,11 @@ impl Default for NetworkConfig {
             retransmit_timeout_ms: 5000,
             retransmit_max_retries: 3,
             offer_interval_secs: 60,
+            rate_limit_fps: 100,
+            publish_rate_limit_fps: 10,
+            max_connections: 64,
+            max_per_peer: 4,
+            idem_ttl_secs: 60,
         }
     }
 }
