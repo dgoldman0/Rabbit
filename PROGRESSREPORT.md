@@ -102,9 +102,59 @@
 
 ---
 
-## Phase 3: Transport Layer ⬜
+## Phase 3: Transport Layer ✅
 
-**Status:** Not started  
+**Commit:** —  
+**Date:** 2026-02-09  
+**Status:** Complete  
+
+### What was built
+
+| Module | Description |
+|--------|-------------|
+| `transport::tunnel` | `Tunnel` trait with `async fn send_frame`, `recv_frame`, `peer_id`, `close`. Uses native `async fn` in traits (Rust 1.75+). All implementations are `Send` for use across tokio tasks. |
+| `transport::memory` | `MemoryTunnel` backed by `tokio::sync::mpsc` channels. Frames are serialized on send and parsed on receive, exercising the full wire format. `memory_tunnel_pair()` factory creates linked bidirectional pairs. |
+| `transport::tls` | `TlsTunnel<S>` generic over any `AsyncRead + AsyncWrite` stream. Buffered frame reading: reads lines until `End:\r\n`, extracts `Length` header, reads body bytes. Works with both client and server TLS streams, and with `tokio::io::duplex` for unit testing. |
+| `transport::cert` | `generate_self_signed()` produces PEM cert+key via `rcgen`. `make_server_config()` builds `Arc<ServerConfig>` from PEM data. Certs use `localhost` SAN — identity is verified at the Rabbit protocol layer, not TLS. |
+| `transport::listener` | `RabbitListener`: binds TCP, accepts TLS connections via `TlsAcceptor`, yields `TlsTunnel<server::TlsStream>` instances with `peer_id = "unknown"` until Rabbit handshake. |
+| `transport::connector` | `connect()` establishes outgoing TCP + TLS. `make_client_config_insecure()` builds a `ClientConfig` with `InsecureServerCertVerifier` — safe because Rabbit verifies identity via Ed25519 challenge, not X.509 chains. |
+
+### Dependencies added
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `rustls` | 0.23 | TLS engine (with ring crypto provider) |
+| `tokio-rustls` | 0.26 | Async TLS streams |
+| `rustls-pemfile` | 2 | PEM cert/key loading |
+| `rcgen` | 0.13 | Self-signed certificate generation |
+
+Tokio features extended: added `net` and `io-util` for TCP and buffered I/O.
+
+### Test counts
+
+- **Unit tests (tunnel/memory):** 6 — send/recv, peer_ids, close→None, body round-trip, ordering (100 frames), bidirectional
+- **Unit tests (tls/duplex):** 6 — duplex send/recv, body round-trip, large body (8KB), 50-frame sequential, close→None, set_peer_id
+- **Unit tests (cert):** 2 — PEM validity, server config construction
+- **Integration tests:** 8 (transport_tests.rs) — memory HELLO exchange, 100-frame ordering, close detection, large body (8KB), TLS full HELLO+FETCH exchange, TLS large body (16KB), TLS 20-frame sequential, TLS disconnect detection
+- **Phase 1+2 tests:** 105 (unchanged)
+- **Total:** 127
+- **Clippy warnings:** 0
+- **cargo fmt:** Clean
+
+### Key design decisions
+
+1. `Tunnel` trait uses native `async fn` (no `async-trait` crate). Generics only, no `dyn Tunnel` needed yet.
+2. `TlsTunnel<S>` is generic over the stream type — works with `server::TlsStream`, `client::TlsStream`, and `tokio::io::DuplexStream` for unit tests without real TCP.
+3. Frame stream reading is separate from `Frame::parse()`: reads lines until `End:\r\n`, extracts `Length`, reads body bytes, then delegates to `Frame::parse` for the combined string.
+4. `InsecureServerCertVerifier` accepts any server cert — TOFU trust is handled at the Rabbit protocol layer, not TLS. This is explicitly safe in the Rabbit threat model.
+5. `MemoryTunnel` serializes/deserializes frames through the wire format on every send/recv, providing full-stack testing without networking.
+6. Cert generation uses `rcgen::generate_simple_self_signed` with `localhost` SAN — burrow identity lives in the protocol, not the cert.
+7. `read_frame_from_stream` is `pub` so higher layers can reuse it with any `AsyncBufRead`.
+
+### Issues encountered and resolved
+
+- Off-by-one in test assertion: "Hello from the burrow!" is 22 bytes, not 21. Fixed.
+- `cargo fmt` reformatted many chained `.await.map_err()` calls — accepted.
 
 ---
 
