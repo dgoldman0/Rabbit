@@ -5,6 +5,7 @@
 
 pub mod ai;
 pub mod burrow;
+pub mod gui;
 pub mod config;
 pub mod content;
 pub mod dispatch;
