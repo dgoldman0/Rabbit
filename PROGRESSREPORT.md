@@ -186,7 +186,7 @@ H8 (537d816), tests (7bcb83f).
 
 | Phase | What | Status |
 |-------|------|--------|
-| I | AI/LLM Integration (type `u`, rabbit-ai peer, chat, commands) | Planned |
+| I | AI/LLM Integration (type `u`, integrated AI connector, chat, commands) | Planned |
 | J | GUI/HTML Rendering Engine (Dioxus+Blitz, AI-driven views) | Planned |
 
 See PLAN.md for full details.
