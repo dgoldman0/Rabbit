@@ -1,360 +1,308 @@
-# Rabbit Burrow Engine — Progress Report
+# Rabbit Burrow Engine — v1.0 Progress Report
 
-**Crate:** rabbit_engine v0.1.0  
-**Branch:** feature/v0.1  
+**Crate:** rabbit_engine v0.1.0 → v1.0.0  
+**Branch:** main  
 **Started:** 2026-02-09  
+**Last updated:** 2026-02-10  
 
 ---
 
-## Phase 1: Protocol Primitives ✅
+## MVP Summary (v0.1 — Complete)
 
-**Commit:** 697cde1  
-**Date:** 2026-02-09  
-**Status:** Complete  
+The MVP was built in 6 phases plus an interactive client phase, all merged
+to main. It delivers a working protocol engine with full test coverage.
 
-### What was built
+| Phase | What | Tests | Commit |
+|-------|------|-------|--------|
+| 1 | Protocol primitives (frame, lane, txn, errors) | 57 | 697cde1 |
+| 2 | Identity & security (Ed25519, trust, auth, caps) | 48 | c3fb9c8 |
+| 3 | Transport (TLS tunnels, memory tunnels, certs) | 22 | 68886b7 |
+| 4 | Dispatch, content, events (router, store, pub/sub) | 64 | aa2ee7c |
+| 5 | Burrow assembly & warren (config, peers, discovery) | 42 | 9d38c79 |
+| 6 | CLI & release (rabbit, burrow, rabbit-warren binaries) | 6 | d8b3cda |
+| 7 | Interactive client & binary rename | 8 | 3ff8f26 |
+| — | Warren discovery wiring (dynamic /warren menu) | 0* | b0d51f9 |
+| | **Total** | **241** | |
 
-| Module | Description |
-|--------|-------------|
-| `protocol::frame` | Frame struct with verb, args, BTreeMap headers, optional body. `parse()` / `serialize()` with CRLF + `End:` wire format. `Frame::new()` splits compound start lines for round-trip fidelity. |
-| `protocol::error` | `ProtocolError` enum with 12 status codes (400–520). `Into<Frame>` for wire transmission. `OutOfOrder` includes `Expected` header. |
-| `protocol::lane` | Lane struct with independent sequence counters, credit-based flow control (default 16 credits), pending-send queue via `VecDeque`. |
-| `protocol::lane_manager` | Async-safe (`tokio::sync::Mutex`) lane registry. Auto-creates lanes on first access. Methods: ack, add_credit, send_or_queue, record_inbound. |
-| `protocol::txn` | `TxnCounter` with `AtomicU64`, produces monotonic `T-<n>` IDs. Thread-safe. |
+\* Warren discovery updated existing tests rather than adding new ones;
+integration test updated to match new info-line format.
 
-### Test counts
+### What works end-to-end today
 
-- **Unit tests:** 45 (frame: 16, error: 6, lane: 10, lane_manager: 7, txn: 4, lib: 2)
-- **Integration tests:** 12 (protocol_tests.rs)
-- **Total:** 57
-- **Clippy warnings:** 0
-- **cargo fmt:** Clean
+- Frame parsing/serialization (text-based, CRLF + `End:`, no JSON)
+- Ed25519 identity generation, persistence, signing, verification
+- TLS 1.3 tunnels (accept + connect, self-signed certs)
+- Full handshake (HELLO → CHALLENGE → AUTH → 200, and anonymous path)
+- Lane multiplexing with sequence numbers, ACK, and credit flow control
+- Transaction correlation (Txn)
+- Frame dispatch (LIST, FETCH, SUBSCRIBE, PUBLISH, PING, ACK, CREDIT)
+- Menu serving (LIST → rabbitmap response)
+- Text content serving (FETCH → text response)
+- Event pub/sub (SUBSCRIBE, PUBLISH, EVENT delivery — *same tunnel only*)
+- Continuity engine (append, replay with Since, prune)
+- TOFU trust cache (implemented, not enforced in handshake)
+- Capability grants (implemented, not enforced in dispatch)
+- Peer tracking and warren discovery (/warren dynamic menu)
+- PING/PONG response (no automatic keepalive timer)
+- TOML configuration with file-backed content
+- Three binaries: `rabbit` (browser), `burrow` (server), `rabbit-warren` (harness)
+- Interactive browsing with navigation stack, type indicators, menu rendering
 
-### Key design decisions
+### Known gaps carried into v1
 
-1. `BTreeMap` for headers — deterministic serialization order.
-2. `Frame::new("200 CONTENT")` splits into verb `"200"` + args `["CONTENT"]` — matches parse behavior for round-trip equality.
-3. Credit-based flow control: frames queue in `pending_out` when credits exhausted; `add_credit()` flushes them.
-4. Lane 0 reserved for control traffic (convention, not yet enforced).
-5. No JSON anywhere — text-only wire format.
+These are documented in detail in PLAN.md. Summary:
 
-### Issues encountered and resolved
-
-- Type inference failure on `Frame::with_args` when using `.into()` — fixed by removing redundant conversion.
-- Round-trip inequality between `new()` and `parse()` for compound verbs — fixed by splitting at construction.
-- Missing `.await` on async `record_inbound()` — caught by compiler.
-- Clippy: needless borrow `&expected.to_string()` — removed.
-
----
-
-## Phase 2: Identity and Security ✅
-
-**Commit:** —  
-**Date:** 2026-02-09  
-**Status:** Complete  
-
-### What was built
-
-| Module | Description |
-|--------|-------------|
-| `security::identity` | `Identity` struct wrapping Ed25519 `SigningKey`. `generate()`, `save(path)` (32-byte seed), `from_file(path)`, `sign(data) -> Vec<u8>`, `verify(pubkey, data, sig)`, `burrow_id() -> "ed25519:<base32>"`. Helper functions: `format_burrow_id`, `parse_burrow_id`, `fingerprint` (SHA-256 hex). |
-| `security::trust` | `TrustCache` with `HashMap<burrow_id, TrustedPeer>`. TOFU model: first contact records fingerprint, same key updates `last_seen`, different key rejects. Persistence via **tab-separated text** (no JSON): `<burrow_id>\t<fingerprint>\t<first_seen>\t<last_seen>`. `save()` / `load()` with deterministic sorted output. Missing file on load → empty cache (not error). |
-| `security::auth` | `Authenticator` (server-side) with `HandshakeState` enum: `AwaitingHello → ChallengeSent → Authenticated` (or `Anonymous`). `handle_hello()` produces `300 CHALLENGE` with random 32-byte hex nonce (or `200 HELLO` for anonymous path). `handle_auth()` verifies Ed25519 signature over nonce, issues session token (32 random bytes, hex-encoded). Client helpers: `build_hello()`, `build_auth_proof()`. Internal hex encode/decode (no extra deps). |
-| `security::permissions` | `Capability` enum (8 variants: Fetch, List, Publish, Subscribe, ManageWarren, ManageBurrows, Federation, UIControl) with `label()` / `from_label()` round-trip. `Grant` struct with TTL via `Instant` + `Duration`. `CapabilityManager`: `grant()`, `check()`, `revoke()`, `revoke_all()`, `prune_expired()`, `active_capabilities()`. Expired grants are denied on check. |
-
-### Dependencies added
-
-| Crate | Version | Purpose |
-|-------|---------|---------|
-| `ed25519-dalek` | 2 (with `rand_core` feature) | Ed25519 keypair, sign, verify |
-| `rand` | 0.8 | Secure random (nonces, session tokens) |
-| `sha2` | 0.10 | SHA-256 fingerprints for trust cache |
-| `base32` | 0.5 | Burrow ID encoding (`ed25519:<base32>`) |
-| `tempfile` | 3 (dev-dependency) | Temporary directories for file I/O tests |
-
-### Test counts
-
-- **Unit tests (identity):** 9 — generate, burrow_id round-trip, sign/verify, bad sig, wrong key, fingerprint, parse invalid, local_id, format_and_parse
-- **Unit tests (trust):** 6 — first contact, same key, different key rejects, remove, peer_ids sorted, empty default
-- **Unit tests (auth):** 11 — anonymous handshake, authenticated handshake, bad signature, auth before challenge, wrong verb, missing burrow-id, session token before auth, hex round-trip, hex invalid, wire round-trip
-- **Unit tests (permissions):** 11 — grant/check, revoke specific, revoke all, expired denied, prune expired, active list, label round-trip, unknown label, grant replaces, default empty, remaining time
-- **Integration tests:** 12 (security_tests.rs) — identity save/load, trust TSV round-trip, trust missing file, trust rejects changed key after reload, full authenticated handshake with trust, anonymous handshake with capabilities, capability expiry, multiple peers independent caps, burrow_id in frame round-trips, signed frame body verifiable, TSV human-readable validation, handshake replay protection
-- **Phase 1 tests:** 57 (unchanged)
-- **Total:** 105
-- **Clippy warnings:** 0
-- **cargo fmt:** Clean
-
-### Key design decisions
-
-1. Identity files store the raw 32-byte Ed25519 seed — minimal, no format overhead.
-2. Burrow ID format: `ed25519:<RFC4648-base32-no-padding>` — 52 chars for the key portion, human-copyable.
-3. Trust cache uses tab-separated text (not JSON) per the spec's "no JSON" rule. Deterministic output via sorted entries.
-4. Nonce is 32 random bytes, hex-encoded in the `Nonce` header. Proof format: `ed25519:<hex(signature)>`.
-5. Session tokens are 32 random bytes, hex-encoded (64 chars). No structured format.
-6. `CapabilityManager` uses `Instant`-based TTL rather than wall-clock time, immune to clock skew.
-7. No external hex crate — simple 2-line encode/decode functions in `auth.rs`.
-
-### Issues encountered and resolved
-
-- Disk space exhaustion during build (crypto deps are large in debug mode) — cleared pip cache and trash to free 6GB.
-- 4 clippy warnings for needless borrows on `set_header()` calls and `is_multiple_of` idiom — auto-fixed.
-- `cargo fmt` reformatted some multi-line closures and function signatures — accepted.
+| Gap | Severity | Plan Phase |
+|-----|----------|------------|
+| Events don't fan out to other tunnels | **Critical** | B |
+| TOFU trust not checked during handshake | High | A |
+| Capabilities not enforced at dispatch | High | A |
+| Continuity not wired to event publish/load | High | A |
+| Lane manager not in dispatch loop | Medium | A |
+| No keepalive timer | Medium | C |
+| No retransmission | Medium | C |
+| No frame size limits | Medium | C |
+| No reconnect logic | Medium | C |
+| SEARCH verb missing | Medium | D |
+| DESCRIBE verb missing | Low | D |
+| DELEGATE verb missing | Low | E |
+| OFFER verb missing | Low | E |
+| Binary content unsupported | Low | F |
+| Session resumption missing | Low | G |
+| Multi-hop routing missing | Low | G |
+| Rate limiting missing | Low | H |
+| No ALPN negotiation | Low | H |
 
 ---
 
-## Phase 3: Transport Layer ✅
+## Phase A: Wire the Existing Subsystems
 
-**Commit:** —  
-**Date:** 2026-02-09  
-**Status:** Complete  
+**Status:** Not started  
+**Priority:** Must-have  
+**Depends on:** —
 
-### What was built
+### Tasks
 
-| Module | Description |
-|--------|-------------|
-| `transport::tunnel` | `Tunnel` trait with `async fn send_frame`, `recv_frame`, `peer_id`, `close`. Uses native `async fn` in traits (Rust 1.75+). All implementations are `Send` for use across tokio tasks. |
-| `transport::memory` | `MemoryTunnel` backed by `tokio::sync::mpsc` channels. Frames are serialized on send and parsed on receive, exercising the full wire format. `memory_tunnel_pair()` factory creates linked bidirectional pairs. |
-| `transport::tls` | `TlsTunnel<S>` generic over any `AsyncRead + AsyncWrite` stream. Buffered frame reading: reads lines until `End:\r\n`, extracts `Length` header, reads body bytes. Works with both client and server TLS streams, and with `tokio::io::duplex` for unit testing. |
-| `transport::cert` | `generate_self_signed()` produces PEM cert+key via `rcgen`. `make_server_config()` builds `Arc<ServerConfig>` from PEM data. Certs use `localhost` SAN — identity is verified at the Rabbit protocol layer, not TLS. |
-| `transport::listener` | `RabbitListener`: binds TCP, accepts TLS connections via `TlsAcceptor`, yields `TlsTunnel<server::TlsStream>` instances with `peer_id = "unknown"` until Rabbit handshake. |
-| `transport::connector` | `connect()` establishes outgoing TCP + TLS. `make_client_config_insecure()` builds a `ClientConfig` with `InsecureServerCertVerifier` — safe because Rabbit verifies identity via Ed25519 challenge, not X.509 chains. |
+- [ ] A1: TOFU trust enforcement in handshake
+- [ ] A2: Capability checks before dispatch
+- [ ] A3: Continuity wired to EventEngine (persist on publish, load on start)
+- [ ] A4: Lane manager integrated into dispatch loop
 
-### Dependencies added
+### Notes
 
-| Crate | Version | Purpose |
-|-------|---------|---------|
-| `rustls` | 0.23 | TLS engine (with ring crypto provider) |
-| `tokio-rustls` | 0.26 | Async TLS streams |
-| `rustls-pemfile` | 2 | PEM cert/key loading |
-| `rcgen` | 0.13 | Self-signed certificate generation |
-
-Tokio features extended: added `net` and `io-util` for TCP and buffered I/O.
-
-### Test counts
-
-- **Unit tests (tunnel/memory):** 6 — send/recv, peer_ids, close→None, body round-trip, ordering (100 frames), bidirectional
-- **Unit tests (tls/duplex):** 6 — duplex send/recv, body round-trip, large body (8KB), 50-frame sequential, close→None, set_peer_id
-- **Unit tests (cert):** 2 — PEM validity, server config construction
-- **Integration tests:** 8 (transport_tests.rs) — memory HELLO exchange, 100-frame ordering, close detection, large body (8KB), TLS full HELLO+FETCH exchange, TLS large body (16KB), TLS 20-frame sequential, TLS disconnect detection
-- **Phase 1+2 tests:** 105 (unchanged)
-- **Total:** 127
-- **Clippy warnings:** 0
-- **cargo fmt:** Clean
-
-### Key design decisions
-
-1. `Tunnel` trait uses native `async fn` (no `async-trait` crate). Generics only, no `dyn Tunnel` needed yet.
-2. `TlsTunnel<S>` is generic over the stream type — works with `server::TlsStream`, `client::TlsStream`, and `tokio::io::DuplexStream` for unit tests without real TCP.
-3. Frame stream reading is separate from `Frame::parse()`: reads lines until `End:\r\n`, extracts `Length`, reads body bytes, then delegates to `Frame::parse` for the combined string.
-4. `InsecureServerCertVerifier` accepts any server cert — TOFU trust is handled at the Rabbit protocol layer, not TLS. This is explicitly safe in the Rabbit threat model.
-5. `MemoryTunnel` serializes/deserializes frames through the wire format on every send/recv, providing full-stack testing without networking.
-6. Cert generation uses `rcgen::generate_simple_self_signed` with `localhost` SAN — burrow identity lives in the protocol, not the cert.
-7. `read_frame_from_stream` is `pub` so higher layers can reuse it with any `AsyncBufRead`.
-
-### Issues encountered and resolved
-
-- Off-by-one in test assertion: "Hello from the burrow!" is 22 bytes, not 21. Fixed.
-- `cargo fmt` reformatted many chained `.await.map_err()` calls — accepted.
+All four subsystems (TrustCache, CapabilityManager, ContinuityStore,
+LaneManager) are fully implemented and unit-tested. The work here is
+integration — calling them at the right points in `burrow.rs` and
+`dispatch/router.rs`.
 
 ---
 
-## Phase 4: Dispatch, Content, and Events ✅
+## Phase B: Event Fan-Out
 
-**Status:** Complete  
-**Commit:** (pending)  
-**Tests added:** 64 (46 unit + 18 integration)  
-**Total tests:** 191
+**Status:** Not started  
+**Priority:** Must-have (highest priority item)  
+**Depends on:** —
 
-### Modules implemented
+### Tasks
 
-| Module | Description |
-|--------|-------------|
-| `dispatch::router` | `Dispatcher` routes incoming frames by verb: LIST→content, FETCH→content, SUBSCRIBE→events, PUBLISH→events, PING→pong, ACK/CREDIT→flow, unknown→400. Returns `DispatchResult` with a primary response and optional extras (e.g. broadcast EVENT frames from publish, replay frames from subscribe). |
-| `content::store` | `ContentStore`: in-memory `HashMap<selector, ContentEntry>`. `ContentEntry` enum: `Menu(Vec<MenuItem>)` or `Text(String)`. `MenuItem` with type_code, label, selector, burrow, hint. Rabbitmap serialization (tab-delimited lines, `.` terminator). Rabbitmap parsing for round-trip fidelity. |
-| `content::handler` | `handle_list()` → 200 MENU with rabbitmap body, `handle_fetch()` → 200 CONTENT with text body. Both echo Lane and Txn headers. Unknown selector → 404 MISSING. |
-| `events::engine` | `EventEngine` with interior mutability (`std::sync::Mutex`). Topic management, subscriber tracking, event logging. `subscribe()` with optional replay from `since_seq`. `publish()` broadcasts EVENT frames to all subscribers. `unsubscribe()`, `replay()`, `load_events()`, `prune()`. |
-| `events::continuity` | `ContinuityStore`: append-only TSV files, one per topic. Format: `seq\ttimestamp\tbody\n`. Newlines/tabs escaped in body. `append()`, `load()`, `replay(since_seq)`, `prune(keep)`. Topic names sanitized for filenames. |
-| `events::handler` | `handle_publish()` and `handle_subscribe()` — thin wrappers that delegate to `EventEngine`. |
+- [ ] B1: SessionManager struct with subscriber registry
+- [ ] B2: Refactor handle_tunnel() to use SessionManager
+- [ ] B3: Reader/writer task split per tunnel
+- [ ] B4: EventEngine returns subscriber IDs with broadcasts
 
-### Test counts
+### Notes
 
-- **Unit tests (content::store):** 9 — rabbitmap round-trip, info lines, menu body with terminator, text body, store CRUD, selectors sorted, parse terminator, view types
-- **Unit tests (content::handler):** 6 — LIST menu, LIST missing, FETCH text, FETCH missing, FETCH menu (rabbitmap), Lane/Txn echoed
-- **Unit tests (dispatch::router):** 6 — PING→PONG, unknown verb→400, ACK→OK, CREDIT→OK, LIST missing→404, FETCH missing→404
-- **Unit tests (events::engine):** 14 — subscribe creates topic, publish creates event, broadcast to all subscribers, subscribe with replay, replay all, unsubscribe, unsubscribe nonexistent, replay standalone, replay nonexistent, sequence increment, load from continuity, prune, topics sorted, publish to no subscribers
-- **Unit tests (events::continuity):** 8 — append/load, load nonexistent, replay filter, prune, body with newlines, body with tabs, sanitize names, has_log
-- **Unit tests (events::handler):** 2 — publish broadcast, subscribe with replay
-- **Integration tests (dispatch_tests.rs):** 9 — LIST menu, FETCH text, FETCH missing, PING/PONG, unknown verb, subscribe+publish lifecycle, subscribe with replay, two subscribers both receive, full content round-trip over MemoryTunnel
-- **Integration tests (event_tests.rs):** 9 — full pubsub lifecycle, replay on late subscribe, replay empty topic, continuity persist/reload, continuity replay from seq, continuity prune, special chars in body, engine restore from continuity, multiple topics independent
-- **Phase 1-3 tests:** 127 (unchanged)
-- **Total:** 191
-- **Clippy warnings:** 0
-- **cargo fmt:** Clean
+This is the single most important fix. Without it, pub/sub only works
+when publisher and subscriber share the same tunnel — which they never
+do in practice (different clients connect on different tunnels).
 
-### Key design decisions
-
-1. `Dispatcher` takes `&ContentStore` and `&EventEngine` — no ownership, no tunnel. Pure frame-in → frame-out. The caller handles I/O.
-2. `DispatchResult` separates the primary response from extras (broadcast/replay frames). This lets the caller route broadcast frames to the correct subscriber tunnels without the dispatcher needing tunnel references.
-3. `EventEngine` uses `std::sync::Mutex` for interior mutability so it can be shared via `&self` from the dispatcher. No async mutex needed — operations are fast in-memory.
-4. Rabbitmap format follows the spec exactly: `<type><label>\t<selector>\t<burrow>\t<hint>\r\n` with `.` terminator. `MenuItem::from_rabbitmap_line()` parses back for round-trip testing.
-5. Continuity TSV escapes `\n` and `\t` in event bodies to maintain one-line-per-event invariant. Human-readable. No JSON.
-6. Topic file paths are sanitized (`/q/chat` → `q_chat.log`) for cross-platform safety.
-7. `EventEngine::load_events()` enables restoring state from continuity on startup, with `next_seq` set to max_loaded + 1.
+The `DispatchResult.extras` mechanism is there but it sends broadcast
+frames back to the publisher. We need a session-level fan-out that routes
+EVENT frames to the correct subscriber tunnels.
 
 ---
 
-## Phase 5: Burrow Assembly and Warren ✅
+## Phase C: Keepalive, Retransmission, and Timeouts
 
-**Status:** Complete  
-**Tests added:** 42 (34 unit + 8 integration)  
-**Total tests:** 233
+**Status:** Not started  
+**Priority:** Must-have  
+**Depends on:** Phase A (lane manager integration)
 
-### Modules implemented
+### Tasks
 
-| Module | Description |
-|--------|-------------|
-| `config` | TOML-based configuration via `serde` (config-only — never wire protocol). `Config` struct with `IdentityConfig`, `NetworkConfig`, `ContentConfig` sections. `ContentConfig` supports `[[content.menus]]` with items, `[[content.text]]` with `body` (inline) or `file` (path reference), `[[content.topics]]` for event topics. `Config::load(path)` reads TOML file; `Config::parse(str)` parses TOML string. Missing file → default config. |
-| `content::loader` | `load_content(config, base_dir) -> ContentStore` — builds a fully populated `ContentStore` from config declarations. File paths are resolved relative to `base_dir`. Inline `body` takes precedence over `file`. Missing file/body produces a clear error. |
-| `warren::peers` | `PeerTable` — async-safe (`tokio::sync::Mutex`) peer registry. `PeerInfo` struct with id, address, name, last_seen, connected. Methods: `register`, `remove`, `get`, `list`, `count`, `mark_connected`, `mark_disconnected`. |
-| `warren::discovery` | `warren_menu(table) -> Vec<MenuItem>` — dynamically builds a menu from the peer table. Connected peers → type `1` entries (navigable). Offline peers → type `i` entries (info). Empty warren → "No peers" info line. |
-| `burrow` | `Burrow` struct owns all subsystems: Identity, ContentStore, EventEngine, ContinuityStore, TrustCache, CapabilityManager, PeerTable. `Burrow::from_config(config, base_dir)` — generates/loads identity key, loads content from TOML, initializes all subsystems. `Burrow::in_memory(name)` — minimal test constructor. `handle_tunnel(tunnel)` — full server-side protocol loop (HELLO/CHALLENGE/AUTH handshake → frame dispatch → clean close). `client_handshake(tunnel)` — client-side handshake helper. `dispatcher()` — creates a Dispatcher from owned content/events. |
-| `security::identity` (extended) | Added `seed_bytes()` and `from_bytes(pubkey, seed)` to allow identity reconstruction for the Authenticator inside `Burrow::handle_tunnel`. |
+- [ ] C1: Periodic PING with missed-pong detection
+- [ ] C2: Retransmission of unacked frames
+- [ ] C3: Handshake timeout on accept
+- [ ] C4: Max frame/body size enforcement
+- [ ] C5: Reconnect with exponential backoff
 
-### Dependencies added
+### Notes
 
-| Crate | Version | Purpose |
-|-------|---------|---------|
-| `serde` | 1 (with `derive` feature) | TOML config deserialization only — never used for wire protocol |
-| `toml` | 0.8 | TOML file parsing |
-
-### Test counts
-
-- **Unit tests (config):** 6 — default config, parse full, parse minimal, parse empty, menu with remote burrow, load missing file
-- **Unit tests (content::loader):** 9 — load empty, inline text, file-backed text, menu, body wins over file, missing body/file error, missing file error, mixed content, remote burrow reference
-- **Unit tests (warren::peers):** 6 — register/get, list, remove, mark connected/disconnected, get missing, register updates
-- **Unit tests (warren::discovery):** 4 — empty warren, connected peer, disconnected peer, mixed peers
-- **Unit tests (burrow):** 9 — in_memory, from_config creates identity, from_config reloads identity, from_config loads content, dispatcher routes list, handle_tunnel anonymous, handle_tunnel with auth, handle_tunnel list+fetch, handle_tunnel pub/sub
-- **Integration tests (warren_tests.rs):** 8 — burrow from TOML config, identity persists across restarts, two-burrow content exchange, two-burrow authenticated, three-burrow warren, warren discovery menu, pubsub across tunnel, config-loaded burrow serves over tunnel
-- **Phase 1-4 tests:** 191 (unchanged)
-- **Total:** 233
-- **Clippy warnings:** 0
-- **cargo fmt:** Clean
-
-### Key design decisions
-
-1. **Serde for config only.** PLAN.md excluded serde from the wire protocol (correctly), but TOML parsing requires serde for deserialization. `serde` + `toml` are used exclusively for `Config` structs — all protocol frames remain hand-parsed text with CRLF + `End:` termination.
-2. **File-backed content.** `[[content.text]]` entries support `file = "path/to/file.txt"` with paths resolved relative to the config's base directory. This lets operators assemble a burrow from existing content files.
-3. **Inline body wins.** If both `body` and `file` are present, `body` takes precedence — defensive default, avoids I/O surprises.
-4. **Identity persistence.** `Burrow::from_config` saves the Ed25519 seed to `<storage>/identity.key` on first run and reloads it on subsequent runs, keeping a stable burrow ID across restarts.
-5. **handle_tunnel is purely frame-driven.** The Burrow doesn't spawn tasks or manage tunnel lifecycle — it runs a synchronous dispatch loop on whatever tunnel the caller provides. This makes it testable with MemoryTunnel and deployable with TlsTunnel identically.
-6. **client_handshake handles both auth paths.** The client sends HELLO, then checks whether the server responded with `300 CHALLENGE` (auth required) or `200 HELLO` (anonymous). Both paths return the server's burrow ID.
-7. **PeerTable uses tokio::sync::Mutex.** Warren peer registration may happen from multiple tasks, so the async mutex matches the transport layer's concurrency model.
-
-### Issues encountered and resolved
-
-- `recv_frame()` returns `Result<Option<Frame>>`, not `Result<Frame>` — fixed all call sites to unwrap the `Option` (closed tunnel returns `None`).
-- `Frame::new("300 CHALLENGE")` splits into verb `"300"` + args `["CHALLENGE"]`, so client handshake compares `response.verb == "300"` not `"300 CHALLENGE"`.
-- Anonymous path sets `Burrow-ID: anonymous` in the server response, not the server's ed25519 ID — test updated accordingly.
-- `SUBSCRIBE` returns `201 SUBSCRIBED` and `PUBLISH` returns `204 DONE` — not `200` — test assertions fixed.
-- `Tunnel` trait must be imported in integration tests (`use rabbit_engine::transport::tunnel::Tunnel;`) for method resolution on `MemoryTunnel`.
-- clippy `derivable_impls` warning for `Config::default()` — switched to `#[derive(Default)]`.
-- clippy `should_implement_trait` for `from_str` — renamed to `Config::parse()`.
-- clippy `redundant_closure` — replaced `.map(|item| f(item))` with `.map(f)`.
+Currently, a dead peer can hold a tunnel open indefinitely. A malicious
+client can send `Length: 999999999` and OOM the server. Outgoing peer
+connections fail silently with no retry. All of these need fixing before
+any real-world deployment.
 
 ---
 
-## Phase 6: CLI and Release Polish ✅
+## Phase D: SEARCH and DESCRIBE Verbs
 
-**Status:** Complete  
-**Tests added:** 6 (integration, TLS-based)  
-**Total tests:** 239
+**Status:** Not started  
+**Priority:** Should-have  
+**Depends on:** —
 
-### Binaries implemented
+### Tasks
 
-| Binary | Description |
-|--------|-------------|
-| `rabbit` | Single-burrow CLI. Subcommands: `serve` (load config, generate/load TLS certs, listen for connections, connect to peers, graceful Ctrl-C shutdown with trust cache save), `init` (generate starter `config.toml`), `info` (show identity, port, content summary). Flags: `--config`, `--name`, `--port`, `--storage`, `--connect` (repeatable). CLI overrides merge with config file values. |
-| `rabbit-warren` | Multi-burrow test harness. Flags: `--count`, `--base-port`, `--config-dir`. Spawns N burrows in-process, each with its own TLS listener. First burrow is root; all others connect to it automatically. Prints warren status summary. Graceful Ctrl-C shutdown saves all trust caches. |
+- [ ] D1: SearchIndex with substring/trigram matching
+- [ ] D2: DESCRIBE handler (metadata without content)
+- [ ] D3: Index built on content load
+- [ ] D4: rabbit browse search sends SEARCH verb
 
-### Modules added / modified
+### Notes
 
-| Module | Description |
-|--------|-------------|
-| `src/bin/rabbit.rs` | CLI entry point using `clap` derive API. `cmd_serve()` — loads config, builds Burrow, generates/loads TLS certs (auto-generates self-signed on first run, saves to `certs/`), binds `RabbitListener`, spawns outgoing peer connections, runs `tokio::select!` accept loop with Ctrl-C shutdown. `cmd_init()` — writes starter TOML template. `cmd_info()` — prints identity/config summary. |
-| `src/bin/rabbit_warren.rs` | Warren launcher. Generates shared TLS cert pair, creates N burrows (from `--config-dir` or default in-memory configs), binds listeners, connects children to root, prints status table, waits for Ctrl-C. |
-| `src/burrow.rs` (modified) | Added `tracing` instrumentation: `#[instrument]` on `from_config`, `handle_tunnel`, `client_handshake`. `info!` for identity load/generate. `debug!` for handshake completion and tunnel close events. |
-| `tests/cli_tests.rs` | 6 integration tests exercising the full TLS stack. |
-
-### Dependencies added
-
-| Crate | Version | Purpose |
-|-------|---------|---------|
-| `clap` | 4 (with `derive` feature) | CLI argument parsing |
-| `tracing` | 0.1 | Structured logging |
-| `tracing-subscriber` | 0.3 (with `fmt` feature) | Log output formatting |
-| `tokio` (modified) | Added `signal` feature | Ctrl-C / SIGINT handling |
-
-### Test counts
-
-- **Integration tests (cli_tests.rs):** 6 — two-burrow TLS content exchange, three-burrow TLS warren, config template validation, config-built burrow over TLS, pub/sub over TLS, identity persistence across TLS sessions
-- **Phase 1-5 tests:** 233 (unchanged)
-- **Total:** 239
-- **Clippy warnings:** 0
-- **cargo fmt:** Clean
-
-### Key design decisions
-
-1. **Auto-generated TLS certs.** On first `rabbit serve`, if `certs/cert.pem` and `certs/key.pem` don't exist, self-signed certs are generated and saved. Subsequent runs reuse them.
-2. **CLI overrides config.** `--name`, `--port`, `--storage`, `--connect` flags take precedence over `config.toml` values. `--connect` peers merge with config peers (no duplicates).
-3. **Shared cert pair for warren.** `rabbit-warren` generates one cert pair shared by all burrows — simplifies local testing without per-burrow cert management.
-4. **Default in-memory configs.** When `--config-dir` is not specified, `rabbit-warren` generates sensible default configs (root named `warren-root`, children named `burrow-N`, each with a welcome menu and about page).
-5. **tracing over println.** All operational logging uses `tracing::info!`/`debug!`/`warn!` with structured fields. The binaries initialize `tracing-subscriber` with uptime timestamps. No `println!` in library code.
-6. **Graceful shutdown.** Both binaries handle `tokio::signal::ctrl_c()`. On shutdown: accept loop exits, trust caches are saved to disk, and the process exits cleanly.
-
-### Also in this phase
-
-- **Clippy cleanup:** Fixed 13 `needless_borrows_for_generic_args` warnings across 5 files (pre-existing from Phases 1-5, caught when `--all-targets` included the new binaries).
-- **README.md:** Complete rewrite with quickstart, CLI reference, example config, architecture diagram, dependency table, and project structure.
+The `rabbit browse` client already has a type-7 search prompt in the UI,
+but it currently sends FETCH with a query parameter. The server needs a
+SEARCH verb handler, and the client needs to send the right verb.
 
 ---
 
-## Phase 7: Interactive Client & Binary Rename ✅
+## Phase E: DELEGATE and OFFER Verbs
 
-**Branch:** feature/interactive-client  
-**Status:** Complete  
+**Status:** Not started  
+**Priority:** Should-have  
+**Depends on:** Phase A (capability enforcement)
 
-### What was built
+### Tasks
 
-| Change | Description |
-|--------|-------------|
-| `src/bin/burrow.rs` | **Renamed** from `rabbit.rs`. Headless server node — `burrow serve`, `burrow init`, `burrow info`. All doc comments and clap metadata updated. |
-| `src/bin/rabbit.rs` | **New** interactive browser binary. Three subcommands: `rabbit browse` (interactive TUI), `rabbit fetch` (one-shot), `rabbit sub` (streaming). Ephemeral Ed25519 identity per session. |
-| `Cargo.toml` | Three `[[bin]]` entries: `burrow`, `rabbit`, `rabbit-warren`. |
-| `README.md` | Updated quickstart, CLI reference, architecture diagram, test count. |
+- [ ] E1: DELEGATE handler (wire-level capability grants)
+- [ ] E2: OFFER handler (peer table merging)
+- [ ] E3: Periodic OFFER for discovery propagation
+- [ ] E4: DELEGATE forwarding to connected peers
 
-### Interactive client features
+### Notes
 
-- **`rabbit browse <addr>`** — Connects to a burrow via TLS, runs full Ed25519 handshake (the rabbit is a peer), sends LIST, parses rabbitmap response, renders a text-mode numbered menu. Navigation: number to select, `b` to go back, `q` to quit. Sub-menus push onto a breadcrumb stack. Type codes drive behaviour: `'1'` → navigate sub-menu, `'0'` → FETCH and display text, `'7'` → prompt for search query, `'q'` → SUBSCRIBE and stream events, `'9'` → skip binary.
-- **`rabbit fetch <addr> <selector>`** — One-shot FETCH. Prints body to stdout. Exit code 1 on error. Ideal for piping.
-- **`rabbit sub <addr> <topic>`** — SUBSCRIBE to a topic. Streams `seq\tbody` lines to stdout. `--since` replays from a sequence number. Runs until Ctrl-C.
-- **Menu rendering** — Box-drawing characters (`┌─`, `│`, `└──`), emoji type indicators (📄 text, 📂 menu, 🔍 search, 📦 binary, ⚡ events). Info lines displayed without numbers. Navigable items numbered sequentially.
-- **Short ID display** — Burrow IDs truncated to `ed25519:XXXXXXXXXXXX…` for readability.
-
-### Test counts
-
-- **New rabbit client tests:** 8 (parse_rabbitmap ×3, render_menu, type_indicator, short_id ×3)
-- **Phase 1-6 tests:** 239 (unchanged)
-- **Total:** 247
-- **Clippy warnings:** 0
-- **cargo fmt:** Clean
-
-### Key design decisions
-
-1. **Ephemeral identity.** The rabbit generates a fresh Ed25519 keypair per session. It's a full peer — the burrow authenticates it — but identity doesn't persist between sessions. Persistent rabbit identity is planned for a future phase.
-2. **No external TUI deps.** The interactive browser uses only `std::io` for input and `println!` for output. No crossterm, ratatui, or curses. Keeps the dependency tree minimal.
-3. **Generic over Tunnel.** `fetch_and_display` and `subscribe_and_stream` accept `&mut T: Tunnel`, so they work with any transport — useful for future testing over memory tunnels.
-4. **Both peers serve.** The naming reflects that even a "rabbit" is a full peer that could serve content. The only difference from a "burrow" is that someone is home.
+Currently, warren discovery works because the test harness manually
+registers children in root's PeerTable at startup (added in b0d51f9).
+In production, discovery needs to propagate dynamically through OFFER
+frames. DELEGATE enables distributed access control.
 
 ---
 
-*Last updated: 2026-02-10*
+## Phase F: Binary Content, Chunked Transfer, and Views
+
+**Status:** Not started  
+**Priority:** Nice-to-have  
+**Depends on:** —
+
+### Tasks
+
+- [ ] F1: Frame body → BodyData enum (Text | Binary)
+- [ ] F2: Binary ContentEntry variant
+- [ ] F3: File-backed binary config loading
+- [ ] F4: Chunked transfer encoding
+- [ ] F5: Accept-View content negotiation
+- [ ] F6: rabbit browse binary file save
+
+### Notes
+
+The deepest architectural constraint: `Frame.body` is currently `String`,
+which is fundamentally UTF-8 only. Adding binary content requires changing
+the body type to an enum, which touches every frame consumer in the
+codebase. This should be done carefully with a migration path.
+
+---
+
+## Phase G: Session Resumption and Multi-Hop Routing
+
+**Status:** Not started  
+**Priority:** Nice-to-have  
+**Depends on:** Phase A (lane manager), Phase E (OFFER for routing table)
+
+### Tasks
+
+- [ ] G1: Session state persistence to disk
+- [ ] G2: Resume handshake (HELLO + Resume header)
+- [ ] G3: RoutingTable from OFFER advertisements
+- [ ] G4: Frame forwarding with Hop-Count
+- [ ] G5: rabbit browse follow redirects (301 MOVED)
+
+### Notes
+
+Session resumption avoids full re-handshake and replay on reconnect.
+Multi-hop routing enables warrens larger than single-hop star topologies.
+Both are important for production warrens but not blocking for v1 launch.
+
+---
+
+## Phase H: Hardening, ALPN, Rate Limiting, and Release Polish
+
+**Status:** Not started  
+**Priority:** Nice-to-have (but important for production)  
+**Depends on:** All other phases
+
+### Tasks
+
+- [ ] H1: ALPN `rabbit/1` negotiation
+- [ ] H2: Per-peer rate limiting
+- [ ] H3: Connection count limits
+- [ ] H4: Idempotency (Idem header)
+- [ ] H5: Timeout header enforcement
+- [ ] H6: QoS header (stream vs event delivery)
+- [ ] H7: Part header (multi-part frames)
+- [ ] H8: Graceful degradation (no panics on bad input)
+- [ ] H9: Criterion benchmarks
+- [ ] H10: Documentation (rustdoc, README, man pages)
+- [ ] H11: Shared binary library (deduplicate rabbit/burrow code)
+
+### Notes
+
+This phase is about production hardening. The current codebase has
+`std::sync::Mutex` (not async) in the event engine, `.unwrap()` calls on
+lock acquisition (panics if poisoned), no frame size limits, and no rate
+limiting. All survivable for development but dangerous in production.
+
+---
+
+## Test Trajectory
+
+| Milestone | Tests |
+|-----------|-------|
+| MVP (current) | 241 |
+| After Phase A | ~270 |
+| After Phase B | ~290 |
+| After Phase C | ~320 |
+| After Phase D | ~340 |
+| After Phase E | ~360 |
+| After Phase F | ~380 |
+| After Phase G | ~400 |
+| After Phase H (v1.0) | ~430 |
+
+---
+
+## Dependency Inventory
+
+All current runtime dependencies (no additions planned for v1):
+
+| Crate | Version | Purpose | Since |
+|-------|---------|---------|-------|
+| `tokio` | 1 | Async runtime | Phase 1 |
+| `thiserror` | 2 | Error derivation | Phase 1 |
+| `ed25519-dalek` | 2 | Ed25519 identity | Phase 2 |
+| `rand` | 0.8 | Secure random | Phase 2 |
+| `sha2` | 0.10 | SHA-256 fingerprints | Phase 2 |
+| `base32` | 0.5 | Burrow ID encoding | Phase 2 |
+| `rustls` | 0.23 | TLS engine | Phase 3 |
+| `tokio-rustls` | 0.26 | Async TLS | Phase 3 |
+| `rustls-pemfile` | 2 | PEM loading | Phase 3 |
+| `rcgen` | 0.13 | Cert generation | Phase 3 |
+| `serde` | 1 | TOML config only | Phase 5 |
+| `toml` | 0.8 | Config parsing | Phase 5 |
+| `clap` | 4 | CLI parsing | Phase 6 |
+| `tracing` | 0.1 | Structured logging | Phase 6 |
+| `tracing-subscriber` | 0.3 | Log output | Phase 6 |
+
+Dev-only additions planned: `criterion` (benchmarks, Phase H).
+
+---
+
+*End of Progress Report*
