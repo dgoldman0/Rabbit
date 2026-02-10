@@ -1,10 +1,12 @@
-//! Content request handlers (LIST and FETCH).
+//! Content request handlers (LIST, FETCH, DESCRIBE, and SEARCH).
 //!
 //! These functions look up a selector in the [`ContentStore`] and
 //! produce the appropriate response frame.  They are pure functions
 //! over the store — no I/O, no side effects.
 
+use crate::content::search::SearchIndex;
 use crate::content::store::{ContentEntry, ContentStore};
+use crate::events::engine::EventEngine;
 use crate::protocol::error::ProtocolError;
 use crate::protocol::frame::Frame;
 
@@ -74,6 +76,109 @@ pub fn handle_fetch(store: &ContentStore, selector: &str, request: &Frame) -> Fr
             frame
         }
     }
+}
+
+/// Handle a `DESCRIBE` request.
+///
+/// Returns metadata about a selector without the full body:
+/// - `View`: content type (`text/rabbitmap` or `text/plain`)
+/// - `Length`: body size in bytes
+/// - `Type`: `menu`, `text`, or `topic`
+///
+/// Also works for event topics: if the selector matches a known
+/// topic in the event engine, returns `Type: topic` with subscriber
+/// and event counts.
+pub fn handle_describe(
+    store: &ContentStore,
+    events: &EventEngine,
+    selector: &str,
+    request: &Frame,
+) -> Frame {
+    let lane = request.header("Lane").unwrap_or("0");
+    let txn = request.header("Txn").unwrap_or("");
+
+    // Check content store first.
+    if let Some(entry) = store.get(selector) {
+        let body_len = entry.to_body().len();
+        let type_str = match entry {
+            ContentEntry::Menu(_) => "menu",
+            ContentEntry::Text(_) => "text",
+        };
+        let mut response = Frame::new("200 META");
+        response.set_header("Lane", lane);
+        if !txn.is_empty() {
+            response.set_header("Txn", txn);
+        }
+        response.set_header("View", entry.view_type());
+        response.set_header("Length", body_len.to_string());
+        response.set_header("Type", type_str);
+        return response;
+    }
+
+    // Check event topics.
+    if events.has_topic(selector) {
+        let event_count = events.event_count(selector);
+        let sub_count = events.subscriber_count(selector);
+        let mut response = Frame::new("200 META");
+        response.set_header("Lane", lane);
+        if !txn.is_empty() {
+            response.set_header("Txn", txn);
+        }
+        response.set_header("Type", "topic");
+        response.set_header("Events", event_count.to_string());
+        response.set_header("Subscribers", sub_count.to_string());
+        return response;
+    }
+
+    // Not found.
+    let err = ProtocolError::Missing(format!("selector not found: {}", selector));
+    let mut frame: Frame = err.into();
+    frame.set_header("Lane", lane);
+    if !txn.is_empty() {
+        frame.set_header("Txn", txn);
+    }
+    frame
+}
+
+/// Handle a `SEARCH` request.
+///
+/// Runs a case-insensitive substring search over the search index
+/// and returns a `200 MENU` with matching selectors.  The query is
+/// taken from the frame body or from the first `?`-delimited part
+/// of the selector (e.g., `SEARCH /7/search?rabbit`).
+pub fn handle_search(index: &SearchIndex, selector: &str, request: &Frame) -> Frame {
+    let lane = request.header("Lane").unwrap_or("0");
+    let txn = request.header("Txn").unwrap_or("");
+
+    // Extract query: body takes precedence, then ?query in selector.
+    let query = request
+        .body
+        .as_deref()
+        .filter(|b| !b.is_empty())
+        .or_else(|| selector.split_once('?').map(|(_, q)| q))
+        .unwrap_or("");
+
+    let results = index.search(query);
+
+    let body = if results.is_empty() {
+        ".\r\n".to_string()
+    } else {
+        let mut body = String::new();
+        for item in &results {
+            body.push_str(&item.to_rabbitmap_line());
+        }
+        body.push_str(".\r\n");
+        body
+    };
+
+    let mut response = Frame::new("200 MENU");
+    response.set_header("Lane", lane);
+    if !txn.is_empty() {
+        response.set_header("Txn", txn);
+    }
+    response.set_header("View", "text/rabbitmap");
+    response.set_body(body);
+    response
 }
 
 #[cfg(test)]

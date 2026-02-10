@@ -8,6 +8,7 @@
 use std::sync::Mutex;
 
 use crate::content::handler as content_handler;
+use crate::content::search::SearchIndex;
 use crate::content::store::{ContentEntry, ContentStore};
 use crate::events::continuity::ContinuityStore;
 use crate::events::engine::EventEngine;
@@ -82,6 +83,8 @@ pub struct Dispatcher<'a> {
     capabilities: Option<&'a Mutex<CapabilityManager>>,
     /// Continuity store for event persistence (optional).
     continuity: Option<&'a ContinuityStore>,
+    /// Search index for SEARCH queries (optional).
+    search_index: Option<&'a SearchIndex>,
 }
 
 impl<'a> Dispatcher<'a> {
@@ -93,6 +96,7 @@ impl<'a> Dispatcher<'a> {
             peers: None,
             capabilities: None,
             continuity: None,
+            search_index: None,
         }
     }
 
@@ -111,6 +115,12 @@ impl<'a> Dispatcher<'a> {
     /// Attach a continuity store for event persistence.
     pub fn with_continuity(mut self, store: &'a ContinuityStore) -> Self {
         self.continuity = Some(store);
+        self
+    }
+
+    /// Attach a search index for SEARCH queries.
+    pub fn with_search_index(mut self, index: &'a SearchIndex) -> Self {
+        self.search_index = Some(index);
         self
     }
 
@@ -238,6 +248,35 @@ impl<'a> Dispatcher<'a> {
                     ack_resp.set_header("Lane", lane);
                 }
                 DispatchResult::single(ack_resp)
+            }
+
+            // ── Metadata ────────────────────────────────────────
+            "DESCRIBE" => {
+                let selector = frame.args.first().map(|s| s.as_str()).unwrap_or("/");
+                let response =
+                    content_handler::handle_describe(self.content, self.events, selector, frame);
+                DispatchResult::single(response)
+            }
+
+            // ── Search ─────────────────────────────────────────
+            "SEARCH" => {
+                let selector = frame.args.first().map(|s| s.as_str()).unwrap_or("/");
+                match &self.search_index {
+                    Some(index) => {
+                        let response = content_handler::handle_search(index, selector, frame);
+                        DispatchResult::single(response)
+                    }
+                    None => {
+                        // No index built — return empty menu.
+                        let mut response = Frame::new("200 MENU");
+                        if let Some(lane) = frame.header("Lane") {
+                            response.set_header("Lane", lane);
+                        }
+                        response.set_header("View", "text/rabbitmap");
+                        response.set_body(".\r\n");
+                        DispatchResult::single(response)
+                    }
+                }
             }
 
             // ── Unknown verb ───────────────────────────────────

@@ -22,6 +22,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::config::Config;
 use crate::content::loader::load_content;
+use crate::content::search::SearchIndex;
 use crate::content::store::ContentStore;
 use crate::dispatch::router::{DispatchResult, Dispatcher};
 use crate::events::continuity::ContinuityStore;
@@ -74,6 +75,8 @@ pub struct Burrow {
     pub retransmit_timeout_ms: u64,
     /// Maximum retransmission attempts before giving up.
     pub retransmit_max_retries: u32,
+    /// Full-text search index over content.
+    pub search_index: SearchIndex,
 }
 
 impl Burrow {
@@ -147,6 +150,7 @@ impl Burrow {
         let sessions = SessionManager::new();
         let capabilities = CapabilityManager::new();
         let peers = PeerTable::new();
+        let search_index = SearchIndex::build_from_store(&content);
 
         Ok(Self {
             identity,
@@ -165,6 +169,7 @@ impl Burrow {
             max_frame_bytes: config.network.max_frame_bytes,
             retransmit_timeout_ms: config.network.retransmit_timeout_ms,
             retransmit_max_retries: config.network.retransmit_max_retries,
+            search_index,
         })
     }
 
@@ -190,6 +195,7 @@ impl Burrow {
             max_frame_bytes: 1_048_576,
             retransmit_timeout_ms: 5000,
             retransmit_max_retries: 3,
+            search_index: SearchIndex::build_from_store(&ContentStore::new()),
         }
     }
 
@@ -215,7 +221,8 @@ impl Burrow {
     pub fn dispatcher(&self) -> Dispatcher<'_> {
         let mut d = Dispatcher::new(&self.content, &self.events)
             .with_peers(&self.peers)
-            .with_capabilities(&self.capabilities);
+            .with_capabilities(&self.capabilities)
+            .with_search_index(&self.search_index);
         if let Some(ref cont) = self.continuity {
             d = d.with_continuity(cont);
         }
