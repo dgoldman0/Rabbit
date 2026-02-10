@@ -77,6 +77,8 @@ pub struct Burrow {
     pub retransmit_max_retries: u32,
     /// Full-text search index over content.
     pub search_index: SearchIndex,
+    /// Interval for periodic OFFER broadcasts in seconds (0 = disabled).
+    pub offer_interval_secs: u64,
 }
 
 impl Burrow {
@@ -170,6 +172,7 @@ impl Burrow {
             retransmit_timeout_ms: config.network.retransmit_timeout_ms,
             retransmit_max_retries: config.network.retransmit_max_retries,
             search_index,
+            offer_interval_secs: config.network.offer_interval_secs,
         })
     }
 
@@ -196,6 +199,7 @@ impl Burrow {
             retransmit_timeout_ms: 5000,
             retransmit_max_retries: 3,
             search_index: SearchIndex::build_from_store(&ContentStore::new()),
+            offer_interval_secs: 60,
         }
     }
 
@@ -278,6 +282,15 @@ impl Burrow {
         let retransmit_max = self.retransmit_max_retries;
         let mut retransmit_ticker = tokio::time::interval(Duration::from_secs(1));
         retransmit_ticker.tick().await; // consume initial instant tick
+
+        // Periodic OFFER state — advertise peer table to connected peer.
+        let offer_enabled = self.offer_interval_secs > 0;
+        let mut offer_ticker = tokio::time::interval(Duration::from_secs(if offer_enabled {
+            self.offer_interval_secs
+        } else {
+            3600 // inert; never fires in practice
+        }));
+        offer_ticker.tick().await; // consume initial instant tick
 
         loop {
             tokio::select! {
@@ -414,6 +427,26 @@ impl Burrow {
                             warn!(peer_id = %peer_id, seq = seq, "frame exceeded max retries — closing tunnel");
                             break;
                         }
+                    }
+                }
+
+                // ── Periodic OFFER — advertise peer table ──────
+                _ = offer_ticker.tick(), if offer_enabled => {
+                    let peers_list = self.peers.list().await;
+                    if !peers_list.is_empty() {
+                        let mut body = String::new();
+                        for p in &peers_list {
+                            body.push_str(&p.id);
+                            body.push('\t');
+                            body.push_str(&p.address);
+                            body.push('\t');
+                            body.push_str(&p.name);
+                            body.push('\n');
+                        }
+                        let mut offer = Frame::with_args("OFFER", vec!["/warren".into()]);
+                        offer.set_body(body);
+                        debug!(peer_id = %peer_id, count = peers_list.len(), "sending periodic OFFER");
+                        tunnel.send_frame(&offer).await?;
                     }
                 }
             }

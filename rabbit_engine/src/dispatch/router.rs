@@ -279,6 +279,121 @@ impl<'a> Dispatcher<'a> {
                 }
             }
 
+            // ── Delegation ──────────────────────────────────────
+            "DELEGATE" => {
+                // DELEGATE <capability> <target_burrow_id>
+                // Requires ManageBurrows capability.
+                let required = Capability::ManageBurrows;
+                if !self.check_cap(peer_id, required) {
+                    return DispatchResult::single(
+                        ProtocolError::Forbidden(format!("{peer_id} lacks {required:?}")).into(),
+                    );
+                }
+
+                let cap_label = match frame.args.first() {
+                    Some(c) => c.as_str(),
+                    None => {
+                        return DispatchResult::single(
+                            ProtocolError::BadRequest(
+                                "DELEGATE requires <capability> argument".into(),
+                            )
+                            .into(),
+                        );
+                    }
+                };
+                let target = match frame.args.get(1) {
+                    Some(t) => t.clone(),
+                    None => {
+                        return DispatchResult::single(
+                            ProtocolError::BadRequest("DELEGATE requires <target> argument".into())
+                                .into(),
+                        );
+                    }
+                };
+                let cap = match Capability::from_label(cap_label) {
+                    Some(c) => c,
+                    None => {
+                        return DispatchResult::single(
+                            ProtocolError::BadRequest(format!("unknown capability: {cap_label}"))
+                                .into(),
+                        );
+                    }
+                };
+                let ttl: u64 = frame
+                    .header("TTL")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(3600);
+
+                // Grant the capability to the target.
+                if let Some(mgr) = self.capabilities {
+                    mgr.lock().unwrap().grant(&target, cap, ttl);
+                }
+
+                let mut response = Frame::new("200 OK");
+                response.set_header("Capability", cap_label);
+                response.set_header("Target", &target);
+                response.set_header("TTL", ttl.to_string());
+                if let Some(lane) = frame.header("Lane") {
+                    response.set_header("Lane", lane);
+                }
+                if let Some(txn) = frame.header("Txn") {
+                    response.set_header("Txn", txn);
+                }
+
+                // If the target is a connected peer, forward the
+                // grant as a DELEGATE-GRANT frame via broadcast.
+                let mut grant_frame =
+                    Frame::with_args("DELEGATE-GRANT", vec![cap_label.to_string()]);
+                grant_frame.set_header("TTL", ttl.to_string());
+                grant_frame.set_header("Granted-By", peer_id);
+
+                let broadcast = vec![(target, grant_frame)];
+                DispatchResult::with_broadcast(response, broadcast)
+            }
+
+            // ── Peer advertisement ─────────────────────────────
+            "OFFER" => {
+                // OFFER body: tab-separated peer lines
+                //   id\taddress\tname
+                // Requires Federation capability.
+                let required = Capability::Federation;
+                if !self.check_cap(peer_id, required) {
+                    return DispatchResult::single(
+                        ProtocolError::Forbidden(format!("{peer_id} lacks {required:?}")).into(),
+                    );
+                }
+
+                let body = frame.body.as_deref().unwrap_or("");
+                let mut accepted = 0usize;
+                if let Some(peers) = self.peers {
+                    for line in body.lines() {
+                        let parts: Vec<&str> = line.split('\t').collect();
+                        if parts.len() >= 2 {
+                            let id = parts[0].to_string();
+                            let address = parts[1].to_string();
+                            let name = if parts.len() >= 3 {
+                                parts[2].to_string()
+                            } else {
+                                String::new()
+                            };
+                            let peer_info = crate::warren::peers::PeerInfo::new(id, address, name);
+                            peers.register(peer_info).await;
+                            accepted += 1;
+                        }
+                    }
+                }
+
+                let mut response = Frame::new("200 OK");
+                response.set_header("Accepted", accepted.to_string());
+                if let Some(lane) = frame.header("Lane") {
+                    response.set_header("Lane", lane);
+                }
+                if let Some(txn) = frame.header("Txn") {
+                    response.set_header("Txn", txn);
+                }
+                DispatchResult::single(response)
+            }
+
             // ── Unknown verb ───────────────────────────────────
             _ => {
                 let err = ProtocolError::BadRequest(format!("unknown verb: {}", frame.verb));

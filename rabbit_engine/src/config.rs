@@ -125,6 +125,8 @@ pub struct NetworkConfig {
     pub retransmit_timeout_ms: u64,
     /// Maximum retransmission attempts before giving up (default 3).
     pub retransmit_max_retries: u32,
+    /// Interval for periodic OFFER broadcasts in seconds (0 = disabled, default 60).
+    pub offer_interval_secs: u64,
 }
 
 impl Default for NetworkConfig {
@@ -137,6 +139,7 @@ impl Default for NetworkConfig {
             max_frame_bytes: 1_048_576,
             retransmit_timeout_ms: 5000,
             retransmit_max_retries: 3,
+            offer_interval_secs: 60,
         }
     }
 }
