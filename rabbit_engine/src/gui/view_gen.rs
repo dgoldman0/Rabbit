@@ -6,6 +6,7 @@
 //! identical content is not re-rendered.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rustls::ClientConfig;
@@ -172,12 +173,93 @@ pub struct ViewGenerator {
 
 impl ViewGenerator {
     /// Create a new view generator.
+    ///
+    /// Automatically loads any previously persisted cache from disk.
     pub fn new(tls: Arc<ClientConfig>, config: AiRendererConfig) -> Self {
-        Self {
+        let mut gen = Self {
             tls,
             config,
             cache: HashMap::new(),
             type_cache: HashMap::new(),
+        };
+        gen.load_cache();
+        gen
+    }
+
+    // ── Disk cache persistence ──────────────────────────────────
+
+    /// Path to the on-disk cache file.
+    fn cache_path() -> Option<PathBuf> {
+        std::env::var("HOME").ok().map(|h| {
+            PathBuf::from(h)
+                .join(".cache")
+                .join("rabbit")
+                .join("view_cache.json")
+        })
+    }
+
+    /// Load cache from disk.  Silently no-ops if the file is absent
+    /// or corrupt.
+    fn load_cache(&mut self) {
+        let path = match Self::cache_path() {
+            Some(p) => p,
+            None => return,
+        };
+        let data = match std::fs::read_to_string(&path) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        // Deserialise the two maps.
+        let val: serde_json::Value = match serde_json::from_str(&data) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("rabbit-gui: cache file corrupt, ignoring: {e}");
+                return;
+            }
+        };
+        if let Some(obj) = val.get("cache").and_then(|v| v.as_object()) {
+            for (k, v) in obj {
+                if let Some(s) = v.as_str() {
+                    self.cache.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        if let Some(obj) = val.get("type_cache").and_then(|v| v.as_object()) {
+            for (k, v) in obj {
+                if let Some(s) = v.as_str() {
+                    self.type_cache.insert(k.clone(), s.to_string());
+                }
+            }
+        }
+        eprintln!(
+            "rabbit-gui: loaded {} cached views from disk ({})",
+            self.cache.len(),
+            path.display()
+        );
+    }
+
+    /// Persist current cache to disk.
+    fn save_cache(&self) {
+        let path = match Self::cache_path() {
+            Some(p) => p,
+            None => return,
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let payload = serde_json::json!({
+            "cache": self.cache,
+            "type_cache": self.type_cache,
+        });
+        match serde_json::to_string(&payload) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, &json) {
+                    eprintln!("rabbit-gui: failed to write cache: {e}");
+                } else {
+                    eprintln!("rabbit-gui: saved {} cached views to disk", self.cache.len());
+                }
+            }
+            Err(e) => eprintln!("rabbit-gui: failed to serialise cache: {e}"),
         }
     }
 
@@ -246,6 +328,7 @@ impl ViewGenerator {
             self.cache.insert(content_key, html.clone());
             // Also store by type for future diff base lookups.
             self.type_cache.insert(type_label.to_string(), html.clone());
+            self.save_cache();
         }
 
         Ok((html, dbg))
@@ -368,10 +451,14 @@ impl ViewGenerator {
         Ok((result, raw, applied, total))
     }
 
-    /// Clear the view cache.
+    /// Clear the view cache (in-memory and on disk).
     pub fn clear_cache(&mut self) {
         self.cache.clear();
         self.type_cache.clear();
+        // Remove on-disk cache file too.
+        if let Some(path) = Self::cache_path() {
+            std::fs::remove_file(&path).ok();
+        }
     }
 
     /// Number of cached views.

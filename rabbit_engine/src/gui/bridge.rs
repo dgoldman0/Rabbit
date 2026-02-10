@@ -119,6 +119,30 @@ pub async fn open_connection(
     })
 }
 
+// ── PING-transparent frame reading ─────────────────────────────
+
+/// Read the next protocol frame, transparently responding to
+/// server-initiated PINGs.
+///
+/// The burrow's keepalive timer sends PING frames at regular
+/// intervals.  If the client fails to PONG, the server drops the
+/// connection after 3 misses.  This helper makes every `recv_frame`
+/// call PING-safe by replying inline.
+pub async fn recv_frame_with_ping(
+    conn: &mut BurrowConnection,
+) -> Result<Option<Frame>, Box<dyn std::error::Error + Send + Sync>> {
+    loop {
+        match conn.tunnel.recv_frame().await? {
+            Some(f) if f.verb == "PING" => {
+                let pong = Frame::new("PONG");
+                conn.tunnel.send_frame(&pong).await?;
+                debug!("responded to PING with PONG");
+            }
+            other => return Ok(other),
+        }
+    }
+}
+
 // ── Protocol operations ────────────────────────────────────────
 
 /// Send a LIST request and parse the rabbitmap response into
@@ -130,9 +154,7 @@ pub async fn list_selector(
     let frame = Frame::with_args("LIST", vec![selector.to_string()]);
     conn.tunnel.send_frame(&frame).await?;
 
-    let response = conn
-        .tunnel
-        .recv_frame()
+    let response = recv_frame_with_ping(conn)
         .await?
         .ok_or("tunnel closed during LIST")?;
 
@@ -171,9 +193,7 @@ pub async fn fetch_selector(
     let frame = Frame::with_args("FETCH", vec![selector.to_string()]);
     conn.tunnel.send_frame(&frame).await?;
 
-    let response = conn
-        .tunnel
-        .recv_frame()
+    let response = recv_frame_with_ping(conn)
         .await?
         .ok_or("tunnel closed during FETCH")?;
 
@@ -212,9 +232,7 @@ pub async fn subscribe_topic(
     sub.set_header("Lane", "0");
     conn.tunnel.send_frame(&sub).await?;
 
-    let ack = conn
-        .tunnel
-        .recv_frame()
+    let ack = recv_frame_with_ping(conn)
         .await?
         .ok_or("tunnel closed during SUBSCRIBE")?;
 

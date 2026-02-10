@@ -17,7 +17,8 @@ use crate::gui::events::{Action, ActionMap};
 use crate::gui::renderer::Renderer;
 use crate::gui::state::{ConnectionStatus, NavStack};
 use crate::gui::theme::{self, Theme};
-use crate::gui::view_gen::{fallback_html, DebugLog, ViewContent, ViewGenerator};
+use crate::gui::view_gen::{build_prompt, fallback_html, DebugLog, ViewContent, ViewGenerator};
+use crate::protocol::frame::Frame;
 use crate::transport::tunnel::Tunnel;
 
 // ── Static launch data ──────────────────────────────────────────
@@ -189,7 +190,33 @@ fn App() -> Element {
             can_back.set(nav.can_go_back());
             can_forward.set(nav.can_go_forward());
 
-            while let Some(cmd) = rx.next().await {
+            loop {
+                tokio::select! {
+                    biased;
+
+                    // ── Tunnel frames (PING keepalive) ─────────
+                    frame_result = conn.tunnel.recv_frame() => {
+                        match frame_result {
+                            Ok(Some(f)) if f.verb == "PING" => {
+                                let pong = Frame::new("PONG");
+                                conn.tunnel.send_frame(&pong).await.ok();
+                            }
+                            Ok(Some(f)) => {
+                                eprintln!("rabbit-gui: unexpected frame in idle loop: {}", f.verb);
+                            }
+                            Ok(None) => {
+                                status_text.set("Connection closed".into());
+                                break;
+                            }
+                            Err(e) => {
+                                status_text.set(format!("Connection error: {}", e));
+                                break;
+                            }
+                        }
+                    }
+
+                    // ── UI commands ────────────────────────────
+                    Some(cmd) = rx.next() => {
                 match cmd {
                     BridgeCommand::Navigate(selector) => {
                         current_selector = selector.clone();
@@ -214,7 +241,7 @@ fn App() -> Element {
                             Ok(body) => {
                                 let content = ViewContent::Text { selector: selector.clone(), body };
                                 html_content.set(
-                                    render_content(&mut view_gen, &content, &theme,
+                                    render_content(&mut conn, &mut view_gen, &content, &theme,
                                         &mut status_text, &mut debug_log).await
                                 );
                                 current_actions.set(ActionMap::for_text_view());
@@ -239,6 +266,10 @@ fn App() -> Element {
                                 let mut messages: Vec<String> = Vec::new();
                                 loop {
                                     match conn.tunnel.recv_frame().await {
+                                        Ok(Some(ref frame)) if frame.verb == "PING" => {
+                                            let pong = Frame::new("PONG");
+                                            conn.tunnel.send_frame(&pong).await.ok();
+                                        }
                                         Ok(Some(frame)) if frame.verb == "EVENT" || frame.verb == "210" => {
                                             let seq = frame.header("Seq").unwrap_or("?").to_string();
                                             let body = frame.body.as_deref().unwrap_or("").trim().to_string();
@@ -312,7 +343,9 @@ fn App() -> Element {
                                 ).await;
                     }
                 }
-            }
+                    } // end Some(cmd)
+                } // end tokio::select!
+            } // end loop
         }
     });
 
@@ -505,8 +538,11 @@ fn render_debug_panel(dbg: &DebugLog) -> Element {
 /// Try AI rendering first; fall back to static HTML on failure.
 ///
 /// Streams tokens from the API and updates the status bar live,
-/// showing each HTML tag as it arrives.
+/// showing each HTML tag as it arrives.  Also responds to server
+/// PINGs on the tunnel so the connection stays alive during long
+/// AI generation calls.
 async fn render_content(
+    conn: &mut BurrowConnection,
     view_gen: &mut Option<ViewGenerator>,
     content: &ViewContent,
     theme: &str,
@@ -518,6 +554,13 @@ async fn render_content(
         let has_cache = gen.cache_size() > 0;
         let mode = if has_cache { "diff" } else { "full" };
         status_signal.set(format!("{model} \u{25B8} {mode}"));
+
+        // ── Populate debug panel early (user prompt visible immediately) ──
+        let early_prompt = build_prompt(content, theme);
+        let mut early_dbg = DebugLog::default();
+        early_dbg.mode = mode.to_string();
+        early_dbg.user_prompt = early_prompt;
+        debug_signal.set(early_dbg);
 
         // Create a channel for streaming progress.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
@@ -546,6 +589,24 @@ async fn render_content(
                         // Show the last HTML tag we've seen.
                         if let Some(tag) = extract_last_tag(&accumulated) {
                             status_signal.set(format!("{model} \u{25B8} {mode} {tag}"));
+                        }
+                    }
+                }
+                // ── Keep tunnel alive — respond to PINGs ──────
+                frame_result = conn.tunnel.recv_frame() => {
+                    match frame_result {
+                        Ok(Some(f)) if f.verb == "PING" => {
+                            let pong = Frame::new("PONG");
+                            conn.tunnel.send_frame(&pong).await.ok();
+                        }
+                        Ok(Some(f)) => {
+                            eprintln!("rabbit-gui: unexpected frame during render: {}", f.verb);
+                        }
+                        Ok(None) => {
+                            eprintln!("rabbit-gui: tunnel closed during AI render");
+                        }
+                        Err(e) => {
+                            eprintln!("rabbit-gui: tunnel error during AI render: {}", e);
                         }
                     }
                 }
@@ -602,7 +663,7 @@ async fn fetch_and_render(
                 selector: selector.to_string(),
                 items: items.clone(),
             };
-            html_signal.set(render_content(view_gen, &content, theme, status_signal, debug_signal).await);
+            html_signal.set(render_content(conn, view_gen, &content, theme, status_signal, debug_signal).await);
             actions_signal.set(ActionMap::from_menu(&items));
             title_signal.set(selector.to_string());
             status_signal.set(format!("Viewing {}", selector));
@@ -611,7 +672,7 @@ async fn fetch_and_render(
             match bridge::fetch_selector(conn, selector).await {
                 Ok(body) => {
                     let content = ViewContent::Text { selector: selector.to_string(), body };
-                    html_signal.set(render_content(view_gen, &content, theme, status_signal, debug_signal).await);
+                    html_signal.set(render_content(conn, view_gen, &content, theme, status_signal, debug_signal).await);
                     actions_signal.set(ActionMap::for_text_view());
                     title_signal.set(selector.to_string());
                     status_signal.set(format!("Viewing {}", selector));
