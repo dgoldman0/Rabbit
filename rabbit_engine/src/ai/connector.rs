@@ -119,7 +119,7 @@ impl AiConnector {
                             api_key: &api_key,
                             model: &self.config.model,
                             messages: history.messages(),
-                            temperature: self.config.params.temperature,
+                            temperature: Some(self.config.params.temperature),
                             max_tokens: self.config.params.max_tokens,
                         };
 

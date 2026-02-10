@@ -62,8 +62,9 @@ pub struct CompletionRequest<'a> {
     pub model: &'a str,
     /// Conversation messages so far.
     pub messages: &'a [AiMessage],
-    /// Sampling temperature.
-    pub temperature: f64,
+    /// Sampling temperature (omitted from request when `None`,
+    /// letting the model use its own default).
+    pub temperature: Option<f64>,
     /// Response token cap.
     pub max_tokens: u32,
 }
@@ -94,7 +95,6 @@ pub async fn chat_completion(req: &CompletionRequest<'_>) -> Result<String, AiHt
     let api_key = req.api_key;
     let model = req.model;
     let messages = req.messages;
-    let temperature = req.temperature;
     let max_tokens = req.max_tokens;
     let tls = req.tls;
 
@@ -115,13 +115,16 @@ pub async fn chat_completion(req: &CompletionRequest<'_>) -> Result<String, AiHt
 
     // Build the JSON body.
     // Use `max_completion_tokens` — newer OpenAI models (GPT-4o, o-series)
-    // reject the legacy `max_tokens` parameter.
-    let body = serde_json::json!({
+    // reject the legacy `max_tokens` parameter.  `temperature` is only
+    // included when explicitly set — some models reject it entirely.
+    let mut body = serde_json::json!({
         "model": model,
         "messages": messages,
-        "temperature": temperature,
         "max_completion_tokens": max_tokens,
     });
+    if let Some(t) = req.temperature {
+        body["temperature"] = serde_json::json!(t);
+    }
     let body_bytes = serde_json::to_vec(&body)?;
 
     // TLS connect.

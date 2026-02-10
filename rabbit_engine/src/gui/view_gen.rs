@@ -50,60 +50,85 @@ pub enum ViewContent {
 
 /// Build a user-message prompt that describes the content for the AI.
 pub fn build_prompt(content: &ViewContent, theme: &str) -> String {
-    let mut prompt = String::with_capacity(1024);
-    prompt.push_str("Render the following Rabbit protocol content as a single HTML document.\n");
-    prompt.push_str(&format!("Theme: {}.\n\n", theme));
+    let mut prompt = String::with_capacity(2048);
+    prompt.push_str(&format!("Theme: {theme}.\n\n"));
 
     match content {
         ViewContent::Menu { selector, items } => {
-            prompt.push_str(&format!("Content type: MENU at selector `{}`\n", selector));
-            prompt.push_str("Items:\n");
+            prompt.push_str(&format!("Content type: MENU at selector `{}`\n\n", selector));
+
+            // Describe each item with full action detail.
+            prompt.push_str("Items (render in order):\n");
             for (i, item) in items.iter().enumerate() {
-                let kind = match item.type_code {
-                    '0' => "text",
-                    '1' => "submenu",
-                    '7' => "search",
-                    '9' => "binary",
-                    'q' => "event-stream",
-                    'i' => "info",
-                    'u' => "ui",
-                    _ => "other",
+                let (kind, action_desc) = match item.type_code {
+                    '0' => ("text",         "clicking fetches a text page"),
+                    '1' => ("submenu",      "clicking navigates to a sub-menu"),
+                    '7' => ("search",       "clicking opens a search prompt"),
+                    '9' => ("binary",       "clicking downloads a binary resource"),
+                    'q' => ("event-stream", "clicking subscribes to a live event stream"),
+                    'i' => ("info",         "non-interactive informational line"),
+                    'u' => ("ui",           "clicking fetches a UI declaration"),
+                    _   => ("other",        "clicking fetches the resource"),
                 };
                 if item.type_code == 'i' {
-                    prompt.push_str(&format!("  - info: \"{}\"\n", item.label));
+                    prompt.push_str(&format!(
+                        "  [{i}] INFO (no id, not clickable): \"{}\"\n",
+                        item.label
+                    ));
                 } else {
                     prompt.push_str(&format!(
-                        "  - [{}] id=\"item_{}\" label=\"{}\" selector=\"{}\" type={}\n",
-                        i, i, item.label, item.selector, kind
+                        "  [{i}] id=\"item_{i}\"  type={kind}  label=\"{}\"  selector=\"{}\"\n\
+                         {}       action: {action_desc}\n",
+                        item.label, item.selector, " ",
                     ));
                 }
             }
-            prompt.push_str("\nEach navigable item must be a clickable element with the specified id attribute.\n");
+
+            prompt.push_str("\nRENDERING INSTRUCTIONS:\n");
+            prompt.push_str("- Each navigable item must be a clickable <a> (no href) with the exact id shown above.\n");
+            prompt.push_str("- Info items are plain text, not wrapped in <a>.\n");
+            prompt.push_str("- Show the selector path as a heading.\n");
+            prompt.push_str("- Use icons or type labels to hint at the item type (folder, document, chat, etc.).\n");
         }
         ViewContent::Text { selector, body } => {
-            prompt.push_str(&format!("Content type: TEXT at selector `{}`\n", selector));
+            prompt.push_str(&format!("Content type: TEXT at selector `{}`\n\n", selector));
             prompt.push_str("Body:\n```\n");
             // Cap at 4KB to avoid token overflow.
             let truncated = if body.len() > 4096 { &body[..4096] } else { body.as_str() };
             prompt.push_str(truncated);
-            prompt.push_str("\n```\n");
-            prompt.push_str("\nRender as a readable article. Include a back button with id=\"nav_back\".\n");
+            prompt.push_str("\n```\n\n");
+            prompt.push_str("RENDERING INSTRUCTIONS:\n");
+            prompt.push_str("- Render as a readable article with nice typography.\n");
+            prompt.push_str("- Include a back button: <a id=\"nav_back\" tabindex=\"0\" style=\"cursor:pointer\">\n");
+            prompt.push_str("- If the text contains what looks like headings, render them as <h2>/<h3>.\n");
         }
         ViewContent::Events { topic, messages } => {
-            prompt.push_str(&format!("Content type: EVENT STREAM for topic `{}`\n", topic));
-            prompt.push_str("Recent messages:\n");
-            for (i, msg) in messages.iter().enumerate().rev().take(20) {
-                prompt.push_str(&format!("  [{}] {}\n", i, msg));
+            prompt.push_str(&format!("Content type: EVENT STREAM for topic `{}`\n\n", topic));
+            prompt.push_str("Recent messages (newest last):\n");
+            for (i, msg) in messages.iter().enumerate() {
+                let escaped = msg.replace('<', "&lt;");
+                prompt.push_str(&format!("  [{i}] {escaped}\n"));
             }
-            prompt.push_str("\nRender as a chat-like view. Include an input field with id=\"chat_input\" and a send button with id=\"chat_send\".\n");
+            prompt.push_str("\nREGISTERED ELEMENT IDs:\n");
+            prompt.push_str("  id=\"chat_messages\" — scrollable message container\n");
+            prompt.push_str("  id=\"chat_input\"    — text input field for composing a message\n");
+            prompt.push_str("  id=\"chat_send\"     — send button (action: submit chat_input value)\n");
+            prompt.push_str("  id=\"nav_back\"      — back button\n\n");
+            prompt.push_str("RENDERING INSTRUCTIONS:\n");
+            prompt.push_str("- Render as a chat-like view with messages in a scrollable div.\n");
+            prompt.push_str("- Most recent messages should be visible (scroll to bottom).\n");
+            prompt.push_str("- Input field and send button at the bottom.\n");
         }
         ViewContent::Status { message } => {
-            prompt.push_str(&format!("Content type: STATUS MESSAGE\nMessage: {}\n", message));
-            prompt.push_str("\nRender as a centered status card.\n");
+            prompt.push_str(&format!("Content type: STATUS MESSAGE\nMessage: {}\n\n", message));
+            prompt.push_str("RENDERING INSTRUCTIONS:\n");
+            prompt.push_str("- Render as a centered status card with the message prominently displayed.\n");
         }
         ViewContent::Loading { selector } => {
-            prompt.push_str(&format!("Content type: LOADING for selector `{}`\n", selector));
-            prompt.push_str("\nRender a minimal loading indicator.\n");
+            prompt.push_str(&format!("Content type: LOADING for selector `{}`\n\n", selector));
+            prompt.push_str("RENDERING INSTRUCTIONS:\n");
+            prompt.push_str("- Render a minimal, elegant loading indicator with the selector name.\n");
+            prompt.push_str("- Use a CSS animation (e.g. pulsing dot or spinner) — no JS.\n");
         }
     }
 
@@ -168,7 +193,7 @@ impl ViewGenerator {
             api_key: &api_key,
             model: &self.config.model,
             messages: &messages,
-            temperature: 0.3,  // Low temperature for consistent rendering.
+            temperature: None, // Let the model use its default.
             max_tokens: 4096,
         };
 
@@ -349,7 +374,8 @@ mod tests {
         };
         let prompt = build_prompt(&content, "dark");
         assert!(prompt.contains("MENU at selector `/`"));
-        assert!(prompt.contains("info: \"Welcome\""));
+        assert!(prompt.contains("INFO (no id, not clickable): \"Welcome\""));
+        assert!(prompt.contains("clicking navigates to a sub-menu"));
         assert!(prompt.contains("id=\"item_1\""));
         assert!(prompt.contains("label=\"Docs\""));
         assert!(prompt.contains("type=submenu"));
