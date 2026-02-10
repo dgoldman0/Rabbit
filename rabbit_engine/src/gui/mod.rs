@@ -8,5 +8,6 @@
 pub mod dom;
 pub mod events;
 pub mod state;
+pub mod theme;
 pub mod view_gen;
 
