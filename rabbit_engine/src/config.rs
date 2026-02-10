@@ -60,6 +60,8 @@ pub struct Config {
     pub content: ContentConfig,
     /// AI configuration (chat connectors).
     pub ai: AiConfig,
+    /// GUI configuration (renderer, theme, AI view generation).
+    pub gui: GuiConfig,
 }
 
 impl AiChatConfig {
@@ -342,6 +344,98 @@ fn default_ai_api_base() -> String {
 
 fn default_ai_system_message() -> String {
     "You are a helpful assistant inside a Rabbit burrow.".into()
+}
+
+/// GUI configuration.
+///
+/// Controls the native graphical interface, including the renderer
+/// backend, window dimensions, theme, and AI-driven view generation.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GuiConfig {
+    /// Whether the GUI is enabled.
+    pub enabled: bool,
+    /// Renderer backend: `"blitz"` (native GPU) or `"webview"` (Tauri/WRY).
+    #[serde(default = "default_gui_renderer")]
+    pub renderer: String,
+    /// Window width in logical pixels.
+    pub window_width: u32,
+    /// Window height in logical pixels.
+    pub window_height: u32,
+    /// Base font size in pixels.
+    pub font_size: u16,
+    /// Colour theme: `"dark"`, `"light"`, or `"system"`.
+    #[serde(default = "default_gui_theme")]
+    pub theme: String,
+    /// AI-powered view renderer settings.
+    pub ai_renderer: AiRendererConfig,
+}
+
+impl Default for GuiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            renderer: default_gui_renderer(),
+            window_width: 1024,
+            window_height: 768,
+            font_size: 16,
+            theme: default_gui_theme(),
+            ai_renderer: AiRendererConfig::default(),
+        }
+    }
+}
+
+/// AI-powered view renderer configuration.
+///
+/// When enabled, burrow content (menus, text, events) is sent to an
+/// LLM which generates HTML+CSS for native rendering.  Uses the same
+/// `ai/http` module as the chat connectors.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AiRendererConfig {
+    /// Whether AI view rendering is enabled.
+    pub enabled: bool,
+    /// Model name (e.g. `"gpt-5-mini"`).
+    #[serde(default = "default_ai_model")]
+    pub model: String,
+    /// API base URL.
+    #[serde(default = "default_ai_api_base")]
+    pub api_base: String,
+    /// System message for the view-generation prompt.
+    #[serde(default = "default_gui_ai_system_message")]
+    pub system_message: String,
+    /// Whether to cache rendered HTML for identical content.
+    pub cache_views: bool,
+}
+
+impl Default for AiRendererConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: default_ai_model(),
+            api_base: default_ai_api_base(),
+            system_message: default_gui_ai_system_message(),
+            cache_views: true,
+        }
+    }
+}
+
+fn default_gui_renderer() -> String {
+    "blitz".into()
+}
+
+fn default_gui_theme() -> String {
+    "dark".into()
+}
+
+fn default_gui_ai_system_message() -> String {
+    "You are a UI renderer for a Rabbit protocol browser. You receive \
+     structured content (menus, text, events) and generate clean HTML \
+     with inline CSS. Rules: Use flexbox for layout. No JavaScript. \
+     Use semantic HTML (nav, main, article, section). Interactive \
+     elements get id attributes (e.g. id=\"item_3\"). Dark theme: \
+     bg #1a1a2e, text #e0e0e0, accent #6366f1. Keep it minimal and \
+     readable.".into()
 }
 
 /// An event topic definition in config.
