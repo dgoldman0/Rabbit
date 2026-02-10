@@ -26,6 +26,7 @@ pub fn handle_list(store: &ContentStore, selector: &str, request: &Frame) -> Fra
                 ContentEntry::Menu(_) => ("200 MENU", entry.to_body()),
                 ContentEntry::Text(_) => ("200 CONTENT", entry.to_body()),
                 ContentEntry::Binary(_, _) => ("200 CONTENT", entry.to_body()),
+                ContentEntry::Ui(_) => ("200 CONTENT", entry.to_body()),
             };
             let mut response = Frame::new(verb);
             response.set_header("Lane", lane);
@@ -134,6 +135,7 @@ pub fn handle_describe(
             ContentEntry::Menu(_) => "menu",
             ContentEntry::Text(_) => "text",
             ContentEntry::Binary(_, _) => "binary",
+            ContentEntry::Ui(_) => "ui",
         };
         let mut response = Frame::new("200 META");
         response.set_header("Lane", lane);

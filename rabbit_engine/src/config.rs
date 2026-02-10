@@ -171,6 +171,8 @@ pub struct ContentConfig {
     pub binary: Vec<BinaryConfig>,
     /// Event topic definitions.
     pub topics: Vec<TopicConfig>,
+    /// UI declaration definitions (type `u`).
+    pub ui: Vec<UiConfig>,
 }
 
 /// A menu definition in config.
@@ -214,6 +216,21 @@ pub struct TextConfig {
     pub body: Option<String>,
     /// Path to a file whose contents become the body.
     /// Resolved relative to the config file's directory.
+    pub file: Option<String>,
+}
+
+/// A UI declaration (type `u`) in config.
+///
+/// UI declarations are structured JSON content served via FETCH
+/// with `View: application/json`. They provide rendering guidelines
+/// for clients (spec \u00a77.4).
+#[derive(Debug, Clone, Deserialize)]
+pub struct UiConfig {
+    /// Selector path (e.g. `/u/chat-view`).
+    pub selector: String,
+    /// Inline JSON body. Mutually exclusive with `file`.
+    pub body: Option<String>,
+    /// Path to a JSON file. Resolved relative to the config directory.
     pub file: Option<String>,
 }
 

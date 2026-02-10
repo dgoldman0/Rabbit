@@ -59,6 +59,12 @@ impl SearchIndex {
                         let label = selector.rsplit('/').next().unwrap_or(&selector).to_string();
                         (label, '9', combined)
                     }
+                    ContentEntry::Ui(json) => {
+                        // UI declarations are indexed by selector and JSON body.
+                        let combined = format!("{} {}", selector, json).to_lowercase();
+                        let label = selector.rsplit('/').next().unwrap_or(&selector).to_string();
+                        (label, 'u', combined)
+                    }
                 };
 
                 entries.push(IndexEntry {

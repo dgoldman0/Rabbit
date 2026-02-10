@@ -98,6 +98,8 @@ pub enum ContentEntry {
     Text(String),
     /// Binary content (raw bytes + MIME type).
     Binary(Vec<u8>, String),
+    /// UI declaration (type `u`, JSON content per spec \u00a77.4).
+    Ui(String),
 }
 
 impl ContentEntry {
@@ -117,6 +119,7 @@ impl ContentEntry {
             }
             ContentEntry::Text(text) => text.clone(),
             ContentEntry::Binary(_, _) => "[binary content]".to_string(),
+            ContentEntry::Ui(json) => json.clone(),
         }
     }
 
@@ -134,6 +137,7 @@ impl ContentEntry {
             ContentEntry::Menu(_) => "text/rabbitmap",
             ContentEntry::Text(_) => "text/plain",
             ContentEntry::Binary(_, mime) => mime,
+            ContentEntry::Ui(_) => "application/json",
         }
     }
 
@@ -142,6 +146,7 @@ impl ContentEntry {
         match self {
             ContentEntry::Menu(_) | ContentEntry::Text(_) => self.to_body().len(),
             ContentEntry::Binary(data, _) => data.len(),
+            ContentEntry::Ui(json) => json.len(),
         }
     }
 
@@ -151,6 +156,7 @@ impl ContentEntry {
             ContentEntry::Menu(_) => "text/rabbitmap",
             ContentEntry::Text(_) => "text/plain",
             ContentEntry::Binary(_, mime) => mime,
+            ContentEntry::Ui(_) => "application/json",
         }
     }
 }
@@ -190,6 +196,12 @@ impl ContentStore {
     ) {
         self.entries
             .insert(selector.into(), ContentEntry::Binary(data, mime.into()));
+    }
+
+    /// Register a UI declaration at the given selector.
+    pub fn register_ui(&mut self, selector: impl Into<String>, json: impl Into<String>) {
+        self.entries
+            .insert(selector.into(), ContentEntry::Ui(json.into()));
     }
 
     /// Look up a selector and return the entry (if it exists).
