@@ -6,5 +6,6 @@
 //! entry point requires the `gui` feature.
 
 pub mod dom;
+pub mod events;
 pub mod view_gen;
 
