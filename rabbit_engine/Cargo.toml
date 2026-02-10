@@ -1,0 +1,13 @@
+[package]
+name = "rabbit_engine"
+version = "0.1.0"
+edition = "2021"
+description = "Rabbit protocol burrow engine — text-based, peer-to-peer, asynchronous."
+license = "MIT"
+
+[dependencies]
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
