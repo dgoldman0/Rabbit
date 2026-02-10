@@ -80,7 +80,7 @@ async fn search_matching_two_results() {
     let body = resp.body.as_deref().unwrap();
     let items: Vec<MenuItem> = body
         .lines()
-        .filter_map(|l| MenuItem::from_rabbitmap_line(l))
+        .filter_map(MenuItem::from_rabbitmap_line)
         .collect();
     assert_eq!(items.len(), 2, "expected 2 results, got: {:?}", items);
 
@@ -112,7 +112,7 @@ async fn search_no_matches_returns_empty_menu() {
     // Empty menu = just the terminator.
     let items: Vec<MenuItem> = body
         .lines()
-        .filter_map(|l| MenuItem::from_rabbitmap_line(l))
+        .filter_map(MenuItem::from_rabbitmap_line)
         .collect();
     assert!(items.is_empty(), "expected 0 results, got: {:?}", items);
 
@@ -140,7 +140,7 @@ async fn search_query_in_body_takes_precedence() {
     let body = resp.body.as_deref().unwrap();
     let items: Vec<MenuItem> = body
         .lines()
-        .filter_map(|l| MenuItem::from_rabbitmap_line(l))
+        .filter_map(MenuItem::from_rabbitmap_line)
         .collect();
     // "changelog" only appears in /0/changelog.
     assert_eq!(items.len(), 1);

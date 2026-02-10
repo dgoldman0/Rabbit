@@ -152,6 +152,8 @@ pub struct ContentConfig {
     pub menus: Vec<MenuConfig>,
     /// Text content definitions.
     pub text: Vec<TextConfig>,
+    /// Binary content definitions.
+    pub binary: Vec<BinaryConfig>,
     /// Event topic definitions.
     pub topics: Vec<TopicConfig>,
 }
@@ -205,6 +207,17 @@ pub struct TextConfig {
 pub struct TopicConfig {
     /// Topic path (e.g. `/q/chat`).
     pub path: String,
+}
+
+/// A binary content definition in config.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BinaryConfig {
+    /// Selector path (e.g. `/9/logo.png`).
+    pub selector: String,
+    /// Path to the binary file, resolved relative to config directory.
+    pub file: String,
+    /// MIME type (e.g. `image/png`, `application/octet-stream`).
+    pub mime: String,
 }
 
 #[cfg(test)]
@@ -315,6 +328,27 @@ items = [
 "#;
         let cfg = Config::parse(toml).unwrap();
         assert_eq!(cfg.content.menus[0].items[0].burrow, "ed25519:ABCDE");
+    }
+
+    #[test]
+    fn parse_binary_config() {
+        let toml = r#"
+[[content.binary]]
+selector = "/9/logo"
+file = "assets/logo.png"
+mime = "image/png"
+
+[[content.binary]]
+selector = "/9/data"
+file = "data.bin"
+mime = "application/octet-stream"
+"#;
+        let cfg = Config::parse(toml).unwrap();
+        assert_eq!(cfg.content.binary.len(), 2);
+        assert_eq!(cfg.content.binary[0].selector, "/9/logo");
+        assert_eq!(cfg.content.binary[0].file, "assets/logo.png");
+        assert_eq!(cfg.content.binary[0].mime, "image/png");
+        assert_eq!(cfg.content.binary[1].mime, "application/octet-stream");
     }
 
     #[test]

@@ -29,6 +29,12 @@ pub fn load_content(config: &Config, base_dir: &Path) -> Result<ContentStore, Pr
         store.register_text(&text.selector, body);
     }
 
+    // Register binary entries
+    for bin in &config.content.binary {
+        let data = resolve_binary_data(bin, base_dir)?;
+        store.register_binary(&bin.selector, data, &bin.mime);
+    }
+
     Ok(store)
 }
 
@@ -68,6 +74,21 @@ fn resolve_text_body(
         "text entry '{}' has neither body nor file",
         text.selector
     )))
+}
+
+/// Read binary data from a file relative to `base_dir`.
+fn resolve_binary_data(
+    bin: &crate::config::BinaryConfig,
+    base_dir: &Path,
+) -> Result<Vec<u8>, ProtocolError> {
+    let path = base_dir.join(&bin.file);
+    std::fs::read(&path).map_err(|e| {
+        ProtocolError::InternalError(format!(
+            "failed to read binary file '{}': {}",
+            path.display(),
+            e
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -203,6 +224,40 @@ body = "Inline text."
             "About this burrow."
         );
         assert_eq!(store.get("/0/inline").unwrap().to_body(), "Inline text.");
+    }
+
+    #[test]
+    fn load_binary_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let data: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // PNG header
+        std::fs::write(dir.path().join("logo.png"), &data).unwrap();
+
+        let toml = r#"
+[[content.binary]]
+selector = "/9/logo"
+file = "logo.png"
+mime = "image/png"
+"#;
+        let cfg = Config::parse(toml).unwrap();
+        let store = load_content(&cfg, dir.path()).unwrap();
+        let entry = store.get("/9/logo").unwrap();
+        assert_eq!(entry.view_type(), "image/png");
+        assert_eq!(entry.mime_type(), "image/png");
+        assert_eq!(entry.binary_bytes(), Some(data.as_slice()));
+        assert_eq!(entry.body_length(), 8);
+    }
+
+    #[test]
+    fn load_missing_binary_is_error() {
+        let toml = r#"
+[[content.binary]]
+selector = "/9/gone"
+file = "no_such.bin"
+mime = "application/octet-stream"
+"#;
+        let cfg = Config::parse(toml).unwrap();
+        let result = load_content(&cfg, Path::new("."));
+        assert!(result.is_err());
     }
 
     #[test]

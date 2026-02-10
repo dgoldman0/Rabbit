@@ -25,6 +25,7 @@ pub fn handle_list(store: &ContentStore, selector: &str, request: &Frame) -> Fra
             let (verb, body) = match entry {
                 ContentEntry::Menu(_) => ("200 MENU", entry.to_body()),
                 ContentEntry::Text(_) => ("200 CONTENT", entry.to_body()),
+                ContentEntry::Binary(_, _) => ("200 CONTENT", entry.to_body()),
             };
             let mut response = Frame::new(verb);
             response.set_header("Lane", lane);
@@ -57,13 +58,42 @@ pub fn handle_fetch(store: &ContentStore, selector: &str, request: &Frame) -> Fr
 
     match store.get(selector) {
         Some(entry) => {
+            // Check Accept-View negotiation if present.
+            if let Some(accept) = request.header("Accept-View") {
+                let view = entry.view_type();
+                let accepted: Vec<&str> = accept.split(',').map(|s| s.trim()).collect();
+                if !accepted.iter().any(|a| *a == view || *a == "*/*") {
+                    let mut resp = Frame::new("406 NOT ACCEPTABLE");
+                    resp.set_header("Lane", lane);
+                    if !txn.is_empty() {
+                        resp.set_header("Txn", txn);
+                    }
+                    resp.set_body(format!(
+                        "no acceptable view: offered {}, accepted {:?}",
+                        view, accepted
+                    ));
+                    return resp;
+                }
+            }
+
             let mut response = Frame::new("200 CONTENT");
             response.set_header("Lane", lane);
             if !txn.is_empty() {
                 response.set_header("Txn", txn);
             }
             response.set_header("View", entry.view_type());
-            response.set_body(entry.to_body());
+            match entry {
+                ContentEntry::Binary(data, _) => {
+                    // Encode binary as base64 for text-based transport.
+                    use base64::Engine as _;
+                    let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+                    response.set_header("Transfer", "base64");
+                    response.set_body(encoded);
+                }
+                _ => {
+                    response.set_body(entry.to_body());
+                }
+            }
             response
         }
         None => {
@@ -99,10 +129,11 @@ pub fn handle_describe(
 
     // Check content store first.
     if let Some(entry) = store.get(selector) {
-        let body_len = entry.to_body().len();
+        let body_len = entry.body_length();
         let type_str = match entry {
             ContentEntry::Menu(_) => "menu",
             ContentEntry::Text(_) => "text",
+            ContentEntry::Binary(_, _) => "binary",
         };
         let mut response = Frame::new("200 META");
         response.set_header("Lane", lane);

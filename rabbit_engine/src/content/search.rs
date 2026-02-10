@@ -53,6 +53,12 @@ impl SearchIndex {
                         let label = selector.rsplit('/').next().unwrap_or(&selector).to_string();
                         (label, '0', combined.to_lowercase())
                     }
+                    ContentEntry::Binary(_, mime) => {
+                        // Binary entries are indexed by selector and MIME type only.
+                        let combined = format!("{} {}", selector, mime).to_lowercase();
+                        let label = selector.rsplit('/').next().unwrap_or(&selector).to_string();
+                        (label, '9', combined)
+                    }
                 };
 
                 entries.push(IndexEntry {

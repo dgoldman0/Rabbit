@@ -643,6 +643,7 @@ name = "rabbit_engine"
 version = "0.1.0"
 dependencies = [
  "base32",
+ "base64",
  "clap",
  "ed25519-dalek",
  "rand",
