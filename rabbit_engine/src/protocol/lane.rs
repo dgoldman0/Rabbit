@@ -10,9 +10,23 @@
 //! flushed when new credit arrives.
 
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 /// Default credit window granted to new lanes.
 pub const DEFAULT_CREDIT: u32 = 16;
+
+/// A frame that has been sent but not yet acknowledged.
+#[derive(Debug, Clone)]
+pub struct InFlightFrame {
+    /// Sequence number assigned when sent.
+    pub seq: u64,
+    /// Serialised frame data (for retransmission).
+    pub data: String,
+    /// When the frame was last (re)sent.
+    pub sent_at: Instant,
+    /// How many times the frame has been retransmitted.
+    pub retries: u32,
+}
 
 /// A single lane within a tunnel.
 #[derive(Debug)]
@@ -34,6 +48,9 @@ pub struct Lane {
 
     /// Frames waiting for credit before they can be sent.
     pending_out: VecDeque<String>,
+
+    /// Frames sent but not yet acknowledged (for retransmission).
+    in_flight: VecDeque<InFlightFrame>,
 }
 
 impl Lane {
@@ -46,6 +63,7 @@ impl Lane {
             acked_up_to: 0,
             credits: DEFAULT_CREDIT,
             pending_out: VecDeque::new(),
+            in_flight: VecDeque::new(),
         }
     }
 
@@ -89,6 +107,14 @@ impl Lane {
     pub fn ack(&mut self, seq: u64) {
         if seq > self.acked_up_to {
             self.acked_up_to = seq;
+            // Remove acknowledged frames from the in-flight buffer.
+            while let Some(front) = self.in_flight.front() {
+                if front.seq <= seq {
+                    self.in_flight.pop_front();
+                } else {
+                    break;
+                }
+            }
         }
     }
 
@@ -141,6 +167,45 @@ impl Lane {
     /// Return the number of frames waiting in the pending queue.
     pub fn pending_count(&self) -> usize {
         self.pending_out.len()
+    }
+
+    /// Record that a frame was sent on this lane for retransmission
+    /// tracking.
+    pub fn record_sent(&mut self, seq: u64, data: String) {
+        self.in_flight.push_back(InFlightFrame {
+            seq,
+            data,
+            sent_at: Instant::now(),
+            retries: 0,
+        });
+    }
+
+    /// Check for frames that need retransmission.
+    ///
+    /// Returns `Ok(frames_to_resend)` if all retries are within
+    /// limits, or `Err(seq)` if a frame has exceeded `max_retries`.
+    pub fn check_retransmissions(
+        &mut self,
+        timeout: Duration,
+        max_retries: u32,
+    ) -> Result<Vec<String>, u64> {
+        let mut to_resend = Vec::new();
+        for entry in &mut self.in_flight {
+            if entry.sent_at.elapsed() >= timeout {
+                if entry.retries >= max_retries {
+                    return Err(entry.seq);
+                }
+                entry.retries += 1;
+                entry.sent_at = Instant::now();
+                to_resend.push(entry.data.clone());
+            }
+        }
+        Ok(to_resend)
+    }
+
+    /// Return the number of in-flight (sent but unacked) frames.
+    pub fn in_flight_count(&self) -> usize {
+        self.in_flight.len()
     }
 }
 

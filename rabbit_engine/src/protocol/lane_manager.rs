@@ -6,6 +6,7 @@
 //! via `Arc<LaneManager>`.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use tokio::sync::Mutex;
 
@@ -83,6 +84,31 @@ impl LaneManager {
         let mut ids: Vec<u16> = lanes.keys().copied().collect();
         ids.sort();
         ids
+    }
+
+    /// Record a sent frame for retransmission tracking.
+    pub async fn record_sent(&self, lane_id: u16, seq: u64, data: String) {
+        let mut lanes = self.lanes.lock().await;
+        let lane = lanes.entry(lane_id).or_insert_with(|| Lane::new(lane_id));
+        lane.record_sent(seq, data);
+    }
+
+    /// Check all lanes for frames needing retransmission.
+    ///
+    /// Returns `Ok(frames_to_resend)` or `Err(seq)` if any frame
+    /// exceeded `max_retries`.
+    pub async fn check_retransmissions(
+        &self,
+        timeout: Duration,
+        max_retries: u32,
+    ) -> Result<Vec<String>, u64> {
+        let mut lanes = self.lanes.lock().await;
+        let mut all_resends = Vec::new();
+        for lane in lanes.values_mut() {
+            let resends = lane.check_retransmissions(timeout, max_retries)?;
+            all_resends.extend(resends);
+        }
+        Ok(all_resends)
     }
 }
 

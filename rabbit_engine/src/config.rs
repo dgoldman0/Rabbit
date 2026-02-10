@@ -115,6 +115,16 @@ pub struct NetworkConfig {
     pub port: u16,
     /// Peer addresses to connect to on startup.
     pub peers: Vec<String>,
+    /// Keepalive interval in seconds (0 = disabled, default 30).
+    pub keepalive_secs: u64,
+    /// Handshake timeout in seconds (default 10).
+    pub handshake_timeout_secs: u64,
+    /// Maximum frame body size in bytes (default 1 MB).
+    pub max_frame_bytes: usize,
+    /// Retransmission timeout in milliseconds (default 5000).
+    pub retransmit_timeout_ms: u64,
+    /// Maximum retransmission attempts before giving up (default 3).
+    pub retransmit_max_retries: u32,
 }
 
 impl Default for NetworkConfig {
@@ -122,6 +132,11 @@ impl Default for NetworkConfig {
         Self {
             port: 7443,
             peers: Vec::new(),
+            keepalive_secs: 30,
+            handshake_timeout_secs: 10,
+            max_frame_bytes: 1_048_576,
+            retransmit_timeout_ms: 5000,
+            retransmit_max_retries: 3,
         }
     }
 }

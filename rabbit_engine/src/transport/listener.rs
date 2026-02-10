@@ -4,10 +4,12 @@
 //! [`TlsTunnel`](super::tls::TlsTunnel) instances ready for frame I/O.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
+use tracing::warn;
 
 use crate::protocol::error::ProtocolError;
 
@@ -54,5 +56,25 @@ impl RabbitListener {
         self.tcp
             .local_addr()
             .map_err(|e| ProtocolError::InternalError(format!("local_addr: {}", e)))
+    }
+
+    /// Accept the next incoming TLS connection with a timeout.
+    ///
+    /// If no connection arrives within `timeout`, returns a
+    /// `ProtocolError::InternalError` with a timeout message.
+    pub async fn accept_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<TlsTunnel<tokio_rustls::server::TlsStream<TcpStream>>, ProtocolError> {
+        match tokio::time::timeout(timeout, self.accept()).await {
+            Ok(result) => result,
+            Err(_) => {
+                warn!(timeout_secs = timeout.as_secs(), "accept timed out");
+                Err(ProtocolError::InternalError(format!(
+                    "accept timed out after {}s",
+                    timeout.as_secs()
+                )))
+            }
+        }
     }
 }
