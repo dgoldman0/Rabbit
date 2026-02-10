@@ -114,11 +114,13 @@ pub async fn chat_completion(req: &CompletionRequest<'_>) -> Result<String, AiHt
     let path = format!("{}/chat/completions", path_prefix);
 
     // Build the JSON body.
+    // Use `max_completion_tokens` — newer OpenAI models (GPT-4o, o-series)
+    // reject the legacy `max_tokens` parameter.
     let body = serde_json::json!({
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": max_tokens,
+        "max_completion_tokens": max_tokens,
     });
     let body_bytes = serde_json::to_vec(&body)?;
 
