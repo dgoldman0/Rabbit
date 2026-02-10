@@ -45,10 +45,13 @@ pub fn make_server_config(cert_pair: &CertPair) -> Result<Arc<ServerConfig>, Pro
         .map_err(|e| ProtocolError::InternalError(format!("parse key PEM: {}", e)))?
         .ok_or_else(|| ProtocolError::InternalError("no private key found in PEM".into()))?;
 
-    let config = ServerConfig::builder()
+    let mut config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| ProtocolError::InternalError(format!("server config: {}", e)))?;
+
+    // H1: Set ALPN protocol to "rabbit/1" for protocol identification.
+    config.alpn_protocols = vec![b"rabbit/1".to_vec()];
 
     Ok(Arc::new(config))
 }

@@ -25,10 +25,14 @@ use super::tls::TlsTunnel;
 /// via the protocol-level Ed25519 handshake and TOFU cache, not via
 /// certificate chain validation.
 pub fn make_client_config_insecure() -> Arc<ClientConfig> {
-    let config = ClientConfig::builder()
+    let mut config = ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier))
         .with_no_client_auth();
+
+    // H1: Set ALPN protocol to "rabbit/1" for protocol identification.
+    config.alpn_protocols = vec![b"rabbit/1".to_vec()];
+
     Arc::new(config)
 }
 
