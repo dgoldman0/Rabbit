@@ -6,6 +6,14 @@ into compliance with SPECS.md v0.2.0 §5.1, §9.2–§9.6.
 **Approach:** Bottom-up — new crypto primitives first, then auth state machine,
 then transport, then callers.  Each step is independently testable.
 
+**PQ strategy (see §9.2.2):** Post-quantum protection operates at up to
+two layers.  The TLS layer MAY negotiate a hybrid PQ cipher suite
+(X25519 + ML-KEM-512 / AES-256-GCM / SHA3-256) if the stack supports
+it. The application-layer PQ exchange (§9.5) is REQUIRED when TLS is
+classical-only, and RECOMMENDED (defense-in-depth) when TLS is already
+hybrid PQ.  The refactor implements the application-layer path first;
+TLS-layer PQ is a transport configuration concern handled in Phase 6.
+
 ---
 
 ## Phase 0: New Dependencies
@@ -807,6 +815,45 @@ pub async fn connect(...) -> Result<TlsTunnel<...>, ProtocolError> {
 
 Same pattern — use `from_server_stream` variant to extract CB + cert.
 
+### 6C. TLS-Layer PQ Cipher Suites (§9.2.1)
+
+If the `rustls` version supports hybrid PQ cipher suites (or a
+custom provider is available), the `ClientConfig` and `ServerConfig`
+should be configured to **offer both** a standard suite and a hybrid
+PQ suite, preferring the PQ suite:
+
+```rust
+// Example: dual cipher suite preference (when available)
+let mut config = rustls::ClientConfig::builder()
+    .with_cipher_suites(&[
+        // Prefer hybrid PQ suite if peer supports it
+        TLS_X25519_MLKEM512_AES_256_GCM_SHA3_256,  // hybrid PQ
+        rustls::cipher_suite::TLS13_AES_128_GCM_SHA256,  // fallback
+    ])
+    // ...
+```
+
+> **Note:** As of rustls 0.23 the hybrid PQ suite above is not a
+> built-in.  This step is deferred until the TLS stack gains native
+> PQ support or a `CryptoProvider` plugin is written.  The
+> application-layer PQ exchange (§9.5) provides full PQ protection
+> in the meantime.
+
+The `TlsTunnel` should expose whether the negotiated suite is PQ:
+
+```rust
+impl<S> TlsTunnel<S> {
+    /// Whether the negotiated TLS cipher suite provides PQ key exchange.
+    pub fn tls_is_pq(&self) -> bool {
+        self.tls_pq
+    }
+}
+```
+
+This lets callers in `burrow.rs` decide whether the application-layer
+PQ exchange is REQUIRED (classical TLS) or RECOMMENDED (hybrid TLS)
+per §9.2.2.
+
 ---
 
 ## Phase 7: GUI Bridge & Binary Callers
@@ -980,3 +1027,10 @@ each other.
    which has no real TLS.  The `channel_binding()` default of `None`
    (mapped to `[0; 32]`) means tests work but don't exercise real CB
    verification.  Add at least one integration test with actual TLS.
+
+6. **TLS-layer PQ availability:** The `rustls` ecosystem does not yet
+   ship a built-in hybrid PQ cipher suite.  Until it does (or a custom
+   `CryptoProvider` is written), the application-layer PQ exchange
+   (§9.5) is the sole source of PQ protection.  The spec and code are
+   structured so that TLS-layer PQ can be enabled later as a
+   transport-only configuration change with no protocol impact.

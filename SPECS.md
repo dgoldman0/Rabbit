@@ -413,10 +413,44 @@ Response: `204 DONE`
   layer (see §5.1, §9.3).
 - ALPN: `rabbit/1`.
 - Implementations MUST NOT accept TLS 1.2 or earlier.
-- Post-quantum protection at the transport layer is provided by the
-  application-layer hybrid PQ exchange (§9.5), not by TLS cipher suite
-  negotiation. This keeps the TLS stack simple while providing
-  defense-in-depth against "harvest now, decrypt later" attacks.
+
+#### 9.2.1 TLS Cipher Suites
+
+Implementations MUST support at least one standard TLS 1.3 cipher suite
+(e.g. `TLS_AES_128_GCM_SHA256` (0x1301)) for interoperability.
+
+Implementations MAY additionally negotiate a **hybrid post-quantum
+cipher suite** at the TLS layer if the underlying TLS stack supports it.
+For example, a suite combining X25519 + ML-KEM-512 key exchange with
+AES-256-GCM and SHA3-256.  When both peers support such a suite, the
+TLS layer itself provides post-quantum forward secrecy.
+
+Dual cipher suite negotiation — offering both a standard suite and a
+hybrid PQ suite, with the PQ suite preferred — is RECOMMENDED for
+implementations whose TLS stack supports it.
+
+#### 9.2.2 Layered PQ Protection
+
+Post-quantum protection in Rabbit operates at **up to two layers**:
+
+1. **TLS-layer PQ** (§9.2.1): If the negotiated TLS cipher suite
+   includes a hybrid PQ key exchange, the TLS record layer is already
+   post-quantum protected.  This is the most transparent path and
+   requires no Rabbit-layer involvement.
+
+2. **Application-layer PQ** (§9.5): The Rabbit handshake performs its
+   own hybrid PQ exchange (X25519 + ML-KEM-512) at the protocol layer.
+   This provides PQ protection independent of the TLS stack.
+
+The relationship between the two layers:
+
+- If the TLS layer is **classical-only**, the application-layer PQ
+  exchange (§9.5) is **REQUIRED** to provide post-quantum protection.
+- If the TLS layer is **hybrid PQ**, the application-layer PQ exchange
+  is **RECOMMENDED** for defense-in-depth, but MAY be omitted.
+- When both layers are active, the session benefits from two
+  independent PQ key agreements — an attacker must break both to
+  compromise post-quantum secrecy.
 
 ### 9.3 Trust Model
 
@@ -483,12 +517,17 @@ terminates TLS independently on each side.
 
 ### 9.5 Hybrid Post-Quantum Key Exchange (Application Layer)
 
-The Rabbit handshake performs a **hybrid PQ key exchange** at the
+The Rabbit handshake MAY perform a **hybrid PQ key exchange** at the
 application layer, combining X25519 (classical) with ML-KEM-512
 (post-quantum, FIPS 203). Both shared secrets are concatenated and
 run through HKDF to derive a single hybrid key. This ensures that
 the session is protected even if either primitive is broken in
 isolation.
+
+This exchange is **REQUIRED** when the underlying TLS connection uses
+a classical-only cipher suite (see §9.2.2). When the TLS layer already
+provides hybrid PQ key exchange, this application-layer exchange is
+**RECOMMENDED** (defense-in-depth) but not mandatory.
 
 #### 9.5.1 Primitives
 
@@ -580,10 +619,17 @@ the authenticated identity.
 
 #### 9.5.6 Graceful Degradation
 
-If either side does not support PQ exchange, the `PQ-Exchange` and
-`PQ-Proof` headers are omitted. The handshake proceeds with classical
-security only (Ed25519 + TLS X25519). Implementations SHOULD log a
-warning when PQ exchange is not available.
+If either side does not support application-layer PQ exchange, the
+`PQ-Exchange` and `PQ-Proof` headers are omitted. The handshake
+proceeds without the application-layer PQ component.
+
+- If the TLS layer negotiated a hybrid PQ cipher suite, the session
+  still has post-quantum protection via TLS.  Implementations MAY
+  treat this as acceptable without warning.
+- If the TLS layer is classical-only **and** application-layer PQ is
+  absent, the session has **no post-quantum protection**.
+  Implementations MUST log a warning and SHOULD expose this state
+  to the user (e.g. a "no PQ" indicator).
 
 ### 9.6 Session Token Derivation
 
