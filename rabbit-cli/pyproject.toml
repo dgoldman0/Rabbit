@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rabbit-client"
+version = "0.1.0"
+description = "Pure-Python CLI client for the Rabbit protocol"
+requires-python = ">=3.10"
+dependencies = ["cryptography>=41.0"]
+
+[project.scripts]
+rabbit = "rabbit_client.cli:main"

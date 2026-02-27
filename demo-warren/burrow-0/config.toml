@@ -1,0 +1,176 @@
+# Warren Root — Demo Configuration
+# This is the main burrow with AI chat enabled
+
+[identity]
+name = "warren-root"
+require_auth = false
+
+[network]
+port = 7443
+
+# GUI configuration (for rabbit-gui client)
+[gui]
+enabled = true
+renderer = "webview"
+window_width = 1280
+window_height = 800
+font_size = 16
+theme = "dark"
+
+[gui.ai_renderer]
+enabled = true
+model = "gpt-4o-mini"
+cache_views = true
+
+# Root menu with chat, warren directory, docs
+[[content.menus]]
+selector = "/"
+items = [
+    { type = "i", label = "🏠 Warren Root — AI-Enabled Burrow" },
+    { type = "i", label = "" },
+    { type = "q", label = "💬 AI Chat", selector = "/q/chat" },
+    { type = "1", label = "🌐 Warren Directory", selector = "/warren" },
+    { type = "1", label = "📚 Documentation", selector = "/1/docs" },
+    { type = "0", label = "ℹ️  About", selector = "/0/about" },
+]
+
+# Documentation submenu
+[[content.menus]]
+selector = "/1/docs"
+items = [
+    { type = "i", label = "📚 Documentation" },
+    { type = "i", label = "" },
+    { type = "0", label = "Getting Started", selector = "/0/getting-started" },
+    { type = "0", label = "Protocol Overview", selector = "/0/protocol" },
+    { type = "0", label = "GUI Features", selector = "/0/gui-features" },
+    { type = "1", label = "← Back", selector = "/" },
+]
+
+# About page
+[[content.text]]
+selector = "/0/about"
+body = """
+🏠 Warren Root Burrow
+
+This is the main burrow in the demo warren. It demonstrates:
+
+• AI/LLM Integration (Phase I)
+  - Chat topics with AI responses
+  - Integrated into the burrow engine
+  - No separate process needed
+
+• Native GUI (Phase J) 
+  - AI-generated HTML views
+  - Rendered via Dioxus + WebView
+  - Dark/light theme support
+  - Navigation with back/forward
+
+Try the AI chat at /q/chat or browse the warren directory
+to see other burrows in the network.
+"""
+
+# Getting Started guide
+[[content.text]]
+selector = "/0/getting-started"
+body = """
+Getting Started with Rabbit
+
+1. Terminal Browser
+   ./rabbit browse 127.0.0.1:7443
+   
+   Navigate with numbers, 'b' for back, 'q' to quit.
+
+2. GUI Browser (requires --features gui)
+   ./rabbit-gui 127.0.0.1:7443
+   
+   Full graphical interface with AI-rendered views.
+
+3. Subscribe to Events
+   ./rabbit sub 127.0.0.1:7443 /q/chat
+   
+   Stream events from a topic to stdout.
+
+4. Fetch Resources
+   ./rabbit fetch 127.0.0.1:7443 /0/about
+   
+   Retrieve a single resource and print it.
+"""
+
+# Protocol Overview
+[[content.text]]
+selector = "/0/protocol"
+body = """
+Rabbit Protocol Overview
+
+The Rabbit protocol is:
+• Text-based (UTF-8, CRLF line endings)
+• Human-readable (no binary serialization)
+• Gopher-inspired menu structure
+• TLS 1.3 encrypted (Ed25519 identities)
+• Async multiplexing (lanes + transactions)
+• Native pub/sub with replay (continuity)
+
+Wire Example:
+  LIST /
+  Lane: L0
+  Txn: T-1
+  End:
+  
+  200 MENU
+  Txn: T-1
+  Length: 42
+  End:
+  i    Welcome!    =    =
+  0    Readme    /0/readme    =
+  .
+
+Clean. Simple. Readable.
+"""
+
+# GUI Features guide
+[[content.text]]
+selector = "/0/gui-features"
+body = """
+GUI Features (Phase J)
+
+The rabbit-gui browser provides:
+
+View Generation
+• AI generates HTML from burrow content
+• Fallback HTML for offline/error states
+• SHA-256 cache for repeated content
+
+Rendering
+• Dioxus reactive framework
+• WebView backend (stable)
+• Blitz GPU backend (experimental, future)
+
+Themes
+• Dark, light, and system themes
+• CSS custom properties
+• Responsive layout
+
+Navigation
+• Back/forward stack
+• Connection status
+• Event log for chat topics
+
+Try it: cargo build --release --features gui
+        ./target/release/rabbit-gui 127.0.0.1:7443
+"""
+
+# Chat topic
+[[content.topics]]
+path = "/q/chat"
+
+# AI chat configuration
+# NOTE: Set OPENAI_API_KEY environment variable to enable AI responses
+# [[ai.chats]]
+# topic = "/q/chat"
+# provider = "openai"
+# model = "gpt-5-mini"
+# system_message = """
+# You are a helpful assistant in a Rabbit burrow network.
+# You can see all messages published to this chat topic.
+# Respond concisely and helpfully. Use markdown formatting.
+# """

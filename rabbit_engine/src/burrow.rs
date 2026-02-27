@@ -15,14 +15,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tracing::{debug, info, instrument, warn};
 
 use std::sync::atomic::AtomicU32;
 
-use crate::config::Config;
+use crate::config::{AiChatConfig, Config};
 use crate::content::loader::load_content;
 use crate::content::search::SearchIndex;
 use crate::content::store::ContentStore;
@@ -54,8 +54,8 @@ pub struct Burrow {
     pub name: String,
     /// In-memory content store (menus and text).
     pub content: ContentStore,
-    /// Pub/sub event engine.
-    pub events: EventEngine,
+    /// Pub/sub event engine (shared with AI connectors).
+    pub events: Arc<EventEngine>,
     /// Append-only event persistence.
     pub continuity: Option<ContinuityStore>,
     /// TOFU trust cache (interior mutability for concurrent tunnel access).
@@ -98,6 +98,8 @@ pub struct Burrow {
     pub max_per_peer: u32,
     /// Current number of active tunnels.
     pub active_connections: AtomicU32,
+    /// AI chat configurations (spawned as background tasks).
+    pub ai_chats: Vec<AiChatConfig>,
 }
 
 impl Burrow {
@@ -132,7 +134,7 @@ impl Burrow {
         let content = load_content(config, &base_dir)?;
 
         // ── Event engine ───────────────────────────────────────
-        let events = EventEngine::new();
+        let events = Arc::new(EventEngine::new());
 
         // ── Continuity store ───────────────────────────────────
         let events_dir = storage.join("events");
@@ -202,6 +204,7 @@ impl Burrow {
             max_connections: config.network.max_connections,
             max_per_peer: config.network.max_per_peer,
             active_connections: AtomicU32::new(0),
+            ai_chats: config.ai.chats.clone(),
         })
     }
 
@@ -214,7 +217,7 @@ impl Burrow {
             identity: Identity::generate(),
             name: name.into(),
             content: ContentStore::new(),
-            events: EventEngine::new(),
+            events: Arc::new(EventEngine::new()),
             continuity: None,
             trust: Mutex::new(TrustCache::new()),
             capabilities: Mutex::new(CapabilityManager::new()),
@@ -236,6 +239,7 @@ impl Burrow {
             max_connections: 0,
             max_per_peer: 0,
             active_connections: AtomicU32::new(0),
+            ai_chats: Vec::new(),
         }
     }
 
@@ -728,7 +732,7 @@ impl Burrow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{AiChatConfig, Config};
     use crate::content::store::MenuItem;
     use crate::protocol::frame::Frame;
     use crate::transport::memory::memory_tunnel_pair;

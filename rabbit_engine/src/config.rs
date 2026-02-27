@@ -58,6 +58,19 @@ pub struct Config {
     pub network: NetworkConfig,
     /// Content definitions (menus, text, topics).
     pub content: ContentConfig,
+    /// AI configuration (chat connectors).
+    pub ai: AiConfig,
+    /// GUI configuration (renderer, theme, AI view generation).
+    pub gui: GuiConfig,
+}
+
+impl AiChatConfig {
+    /// Get the API key from the environment variable.
+    ///
+    /// Returns `None` if `OPENAI_API_KEY` is not set.
+    pub fn api_key(&self) -> Option<String> {
+        std::env::var("OPENAI_API_KEY").ok()
+    }
 }
 
 impl Config {
@@ -171,6 +184,8 @@ pub struct ContentConfig {
     pub binary: Vec<BinaryConfig>,
     /// Event topic definitions.
     pub topics: Vec<TopicConfig>,
+    /// UI declaration definitions (type `u`).
+    pub ui: Vec<UiConfig>,
 }
 
 /// A menu definition in config.
@@ -215,6 +230,230 @@ pub struct TextConfig {
     /// Path to a file whose contents become the body.
     /// Resolved relative to the config file's directory.
     pub file: Option<String>,
+}
+
+/// A UI declaration (type `u`) in config.
+///
+/// UI declarations are structured JSON content served via FETCH
+/// with `View: application/json`. They provide rendering guidelines
+/// for clients (spec \u00a77.4).
+#[derive(Debug, Clone, Deserialize)]
+pub struct UiConfig {
+    /// Selector path (e.g. `/u/chat-view`).
+    pub selector: String,
+    /// Inline JSON body. Mutually exclusive with `file`.
+    pub body: Option<String>,
+    /// Path to a JSON file. Resolved relative to the config directory.
+    pub file: Option<String>,
+}
+
+/// Top-level AI configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct AiConfig {
+    /// Per-topic AI chat configurations.
+    pub chats: Vec<AiChatConfig>,
+}
+
+/// Configuration for a single AI-powered chat topic.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AiChatConfig {
+    /// The event topic this AI participates in (e.g. `/q/chat`).
+    pub topic: String,
+    /// API provider (currently only `"openai"` is supported).
+    #[serde(default = "default_ai_provider")]
+    pub provider: String,
+    /// Model name (e.g. `"gpt-5-mini"`).
+    #[serde(default = "default_ai_model")]
+    pub model: String,
+    /// API base URL.
+    #[serde(default = "default_ai_api_base")]
+    pub api_base: String,
+    /// System message prepended to every conversation.
+    #[serde(default = "default_ai_system_message")]
+    pub system_message: String,
+    /// Model parameters.
+    #[serde(default)]
+    pub params: AiParamsConfig,
+    /// Command execution settings.
+    #[serde(default)]
+    pub commands: AiCommandConfig,
+}
+
+/// Model parameters for AI chat completion.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AiParamsConfig {
+    /// Sampling temperature (0.0–2.0).
+    pub temperature: f64,
+    /// Maximum tokens in the response.
+    pub max_tokens: u32,
+    /// Nucleus sampling parameter.
+    pub top_p: f64,
+}
+
+impl Default for AiParamsConfig {
+    fn default() -> Self {
+        Self {
+            temperature: 0.7,
+            max_tokens: 2048,
+            top_p: 1.0,
+        }
+    }
+}
+
+/// Command execution settings for AI.
+///
+/// Commands are **disabled by default**.  When enabled, only commands
+/// in the `allowed` list can be executed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AiCommandConfig {
+    /// Whether command execution is enabled at all.
+    pub enabled: bool,
+    /// Explicit allowlist of command names (e.g. `["search", "fetch"]`).
+    pub allowed: Vec<String>,
+    /// Maximum recursive command depth.
+    pub max_depth: u32,
+    /// Per-command timeout in seconds.
+    pub timeout_secs: u64,
+}
+
+impl Default for AiCommandConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allowed: Vec::new(),
+            max_depth: 1,
+            timeout_secs: 10,
+        }
+    }
+}
+
+fn default_ai_provider() -> String {
+    "openai".into()
+}
+
+fn default_ai_model() -> String {
+    "gpt-5-mini".into()
+}
+
+fn default_ai_api_base() -> String {
+    "https://api.openai.com/v1".into()
+}
+
+fn default_ai_system_message() -> String {
+    "You are a helpful assistant inside a Rabbit burrow.".into()
+}
+
+/// GUI configuration.
+///
+/// Controls the native graphical interface, including the renderer
+/// backend, window dimensions, theme, and AI-driven view generation.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GuiConfig {
+    /// Whether the GUI is enabled.
+    pub enabled: bool,
+    /// Renderer backend: `"blitz"` (native GPU) or `"webview"` (Tauri/WRY).
+    #[serde(default = "default_gui_renderer")]
+    pub renderer: String,
+    /// Window width in logical pixels.
+    pub window_width: u32,
+    /// Window height in logical pixels.
+    pub window_height: u32,
+    /// Base font size in pixels.
+    pub font_size: u16,
+    /// Colour theme: `"dark"`, `"light"`, or `"system"`.
+    #[serde(default = "default_gui_theme")]
+    pub theme: String,
+    /// AI-powered view renderer settings.
+    pub ai_renderer: AiRendererConfig,
+}
+
+impl Default for GuiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            renderer: default_gui_renderer(),
+            window_width: 1024,
+            window_height: 768,
+            font_size: 16,
+            theme: default_gui_theme(),
+            ai_renderer: AiRendererConfig::default(),
+        }
+    }
+}
+
+/// AI-powered view renderer configuration.
+///
+/// When enabled, burrow content (menus, text, events) is sent to an
+/// LLM which generates HTML+CSS for native rendering.  Uses the same
+/// `ai/http` module as the chat connectors.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AiRendererConfig {
+    /// Whether AI view rendering is enabled.
+    pub enabled: bool,
+    /// Model name (e.g. `"gpt-5-mini"`).
+    #[serde(default = "default_ai_model")]
+    pub model: String,
+    /// API base URL.
+    #[serde(default = "default_ai_api_base")]
+    pub api_base: String,
+    /// System message for the view-generation prompt.
+    #[serde(default = "default_gui_ai_system_message")]
+    pub system_message: String,
+    /// Whether to cache rendered HTML for identical content.
+    pub cache_views: bool,
+}
+
+impl Default for AiRendererConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: default_ai_model(),
+            api_base: default_ai_api_base(),
+            system_message: default_gui_ai_system_message(),
+            cache_views: true,
+        }
+    }
+}
+
+fn default_gui_renderer() -> String {
+    "blitz".into()
+}
+
+fn default_gui_theme() -> String {
+    "dark".into()
+}
+
+fn default_gui_ai_system_message() -> String {
+    "You are a UI renderer for a Rabbit protocol browser. You receive \
+     structured content and generate a single HTML document with inline CSS.\n\
+     \n\
+     RULES:\n\
+     - Return ONLY raw HTML. No markdown fences, no commentary.\n\
+     - Use semantic HTML: <nav>, <main>, <article>, <section>, <header>.\n\
+     - Layout with flexbox. No JavaScript.\n\
+     - Every interactive element MUST have the exact `id` attribute given \
+     in the prompt. Do not invent new IDs.\n\
+     - Non-interactive info lines have no id and must not be clickable.\n\
+     - Use <a> tags WITHOUT an href attribute for clickable items. \
+     Set tabindex=\"0\" and style cursor:pointer so they look and feel clickable.\n\
+     - Standard chrome (nav_back / nav_forward / nav_refresh) is in the host \
+     toolbar already; do NOT duplicate those unless the prompt explicitly asks.\n\
+     \n\
+     THEME TOKENS (use as CSS values):\n\
+       Dark:  bg #1a1a2e, text #e0e0e0, accent #6366f1\n\
+       Light: bg #f5f5f5, text #1a1a2e, accent #6366f1\n\
+     \n\
+     INTERACTION MODEL:\n\
+     The host intercepts all clicks on elements with an id. Each id maps \
+     to an action (NavigateMenu, FetchText, Subscribe, Search, Back, \
+     Forward, Refresh). Your job is to lay out the content beautifully and \
+     assign the correct id to each interactive element. The host handles \
+     all navigation.".into()
 }
 
 /// An event topic definition in config.

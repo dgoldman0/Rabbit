@@ -1,7 +1,7 @@
 # Rabbit Burrow Engine — Progress Report
 
-**Crate:** rabbit_engine v0.1.0 → v1.0.0+  
-**Branch:** feature/v1.0 (main tracks releases)  
+**Crate:** rabbit_engine v0.1.0 → v1.1.0  
+**Branch:** feature/v1.1 (main tracks releases)  
 **Started:** 2026-02-09  
 **Last updated:** 2026-02-10  
 
@@ -57,8 +57,11 @@ integration test updated to match new info-line format.
 - DELEGATE (wire-level capability grants) and OFFER (peer table propagation)
 - Graceful degradation (poisoned mutex recovery, no `.unwrap()` on user input)
 - TOML configuration with file-backed content
-- Three binaries: `rabbit` (browser), `burrow` (server), `rabbit-warren` (harness)
+- Three binaries: `rabbit` (terminal browser), `burrow` (server), `rabbit-warren` (harness)
+- Fourth binary: `rabbit-gui` (native GUI browser, requires `--features gui`)
 - Interactive browsing with navigation stack, type indicators, menu rendering
+- AI/LLM integration with burrow-hosted chat connectors (Phase I)
+- Native GUI with AI-generated HTML views via Dioxus/WebView (Phase J)
 
 ---
 
@@ -144,18 +147,77 @@ H8 (537d816), tests (7bcb83f).
 
 ---
 
-## Current Stats
+## v1.1 Phases — All Complete
+
+| Phase | What | New Tests | Total | Commit(s) |
+|-------|------|-----------|-------|-----------|
+| I | AI/LLM Integration (8 substages) | +53 | 452 | d2ac14f→8a2eaec |
+| J | GUI/HTML Rendering Engine (10 substages) | +128 | 580 | 0839219→b180408 |
+
+### Phase I: AI / LLM Integration — ✅ Complete
+
+**Architecture:** AI connectors integrated directly into the burrow engine.
+When `[[ai.chats]]` is configured, burrow spawns background tasks that
+subscribe to chat topics, call OpenAI-compatible APIs, and publish responses
+back through EventEngine. Zero protocol overhead.
+
+**Substages:**
+- [x] I1: Type `u` UI declarations (§7.4 spec) + serde_json dependency
+- [x] I2: AiConfig structs (chat, params, commands, API key from env)
+- [x] I3: AI conversation types (AiRole, AiMessage, ConversationHistory)
+- [x] I4: Minimal HTTPS module (raw POST over tokio-rustls, ~60 lines)
+- [x] I5: AiConnector runtime (background task per topic)
+- [x] I6: Command execution framework (search/fetch/describe with gating)
+- [x] I7: Burrow AI wiring (spawn connectors on startup)
+- [x] I8: Integration tests (config, type u, conversation, commands)
+
+**Test breakdown:** 16 (I2: view_gen) + 16 (I3: dom) + 12 (I4: events) +
+12 (I5: state) + 9 (I6: theme) + 3 (I7: app, feature-gated) = 68 unit tests
++ 53 new total tests added to lib and integration.
+
+### Phase J: GUI / HTML Rendering Engine — ✅ Complete
+
+**Architecture:** Native GUI browser where AI generates HTML/CSS views from
+burrow content. Dioxus component tree renders via WebView (WRY). No Electron,
+no browser engine — pure Rust + system WebView.
+
+**Substages:**
+- [x] J1: GuiConfig and AiRendererConfig structs
+- [x] J2: ViewGenerator module (AI prompt builder, SHA-256 cache, fallback HTML)
+- [x] J3: HTML sanitizer and DOM ID extractor (strip scripts/handlers)
+- [x] J4: Event binding system (element IDs → protocol actions)
+- [x] J5: Navigation & state management (back/forward stack, connection status)
+- [x] J6: Theme & styling (dark/light/system, CSS variable generation)
+- [x] J7: Dioxus + Blitz integration (app shell, OnceLock pattern for launch)
+- [x] J8: rabbit-gui binary (CLI parser, config loading, feature-gated launch)
+- [x] J9: Renderer backend abstraction (WebView stable, Blitz experimental)
+- [x] J10: Integration tests (54 tests covering view gen, DOM, events, nav, theme)
+
+**Implementation notes:**
+- Dioxus v0.7 with `desktop` feature (WRY/WebView)
+- Feature flag: `gui = ["dep:dioxus"]`, `gui-native = ["gui"]` for future Blitz
+- All GUI code behind `#[cfg(feature = "gui")]`
+- ViewGenerator with SHA-256 content hash cache
+- Fallback HTML for offline/error states
+- 54 integration tests in tests/phase_j_tests.rs
+
+**Test breakdown:** 16 (view_gen) + 16 (dom) + 12 (events) + 12 (state) +
+9 (theme) + 9 (renderer) + 54 (integration) = 128 new tests.
+
+---
+
+## Current Stats (v1.1)
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 399 |
-| Unit tests (src/) | 217 |
-| Integration tests (tests/) | 182 |
+| Total tests | 580 |
+| Lib tests (src/) | 312 |
+| Integration tests (tests/) | 268 |
 | Clippy warnings | 0 |
 | cargo fmt | Clean |
-| Runtime dependencies | 16 |
-| Lines of Rust (src/) | ~6,500 |
-| Lines of test code | ~3,500 |
+| Runtime dependencies | 17 (+1 dioxus, optional) |
+| Lines of Rust (src/) | ~8,200 |
+| Lines of test code | ~4,800 |
 
 ---
 
@@ -179,17 +241,14 @@ H8 (537d816), tests (7bcb83f).
 | `tracing` | 0.1 | Structured logging | MVP Phase 6 |
 | `tracing-subscriber` | 0.3 | Log output | MVP Phase 6 |
 | `base64` | 0.22 | Binary content encoding | Phase F |
+| `serde_json` | 1 | Type `u` UI + AI API | Phase I |
+| `dioxus` | 0.7 | Reactive UI framework | Phase J (optional, `gui` feature) |
 
 ---
 
 ## Upcoming Phases
 
-| Phase | What | Status |
-|-------|------|--------|
-| I | AI/LLM Integration (chat, model config, command execution) | Planned |
-| J | GUI/HTML Rendering Engine (Dioxus+Blitz, AI-driven views) | Planned |
-
-See PLAN.md for full details.
+**All phases complete.** The v1.1 release is ready for merge to `main`.
 
 ---
 

@@ -5,20 +5,24 @@ federated networks of nodes called *burrows*. Inspired by Gopher's
 human-readable simplicity, layered with modern security (Ed25519 + TLS 1.3),
 async multiplexing, and native publish/subscribe with replay.
 
-Three binaries, one crate:
+Four binaries, one crate:
 
 | Binary | Role |
 |--------|------|
 | `burrow` | Headless server node — serves content, routes messages, runs unattended |
-| `rabbit` | Interactive browser — a full peer with a human at the keyboard |
+| `rabbit` | Interactive terminal browser — a full peer with a human at the keyboard |
+| `rabbit-gui` | Native GUI browser with AI-generated HTML views (requires `--features gui`) |
 | `rabbit-warren` | Multi-burrow test harness — launches several nodes in one process |
 
 ## Quick Start
 
 ```bash
-# Build everything
+# Build everything (terminal mode)
 cd rabbit_engine
 cargo build --release
+
+# Build with GUI support (requires system WebView libraries)
+cargo build --release --features gui
 
 # Generate a starter config and start a headless burrow
 ./target/release/burrow init
@@ -32,6 +36,9 @@ cargo build --release
 
 # Subscribe to an event stream
 ./target/release/rabbit sub 127.0.0.1:7443 /q/chat
+
+# Browse with native GUI (requires --features gui)
+./target/release/rabbit-gui 127.0.0.1:7443
 
 # Launch a multi-burrow test warren
 ./target/release/rabbit-warren --count 3 --base-port 7443
@@ -99,6 +106,19 @@ Subscribe to an event topic and stream events to stdout.
 | `<topic>` | Topic path (e.g. `/q/chat`) |
 | `--since` | Replay events since sequence number |
 
+### `rabbit-gui`
+
+Browse a burrow with a native GUI. AI-generated HTML views rendered
+via Dioxus/WebView. Requires building with `--features gui`.
+
+| Arg / Flag | Default | Description |
+|------------|---------|-------------|
+| `<host>` | (required) | Burrow address (e.g. `127.0.0.1:7443`) |
+| `<selector>` | `/` | Starting selector |
+| `--config` / `-c` | `rabbit.toml` | Config file path |
+
+Navigation: **←/→** for back/forward, **↻** to refresh, **mouse/keyboard** for interaction.
+
 ### `rabbit-warren`
 
 Launch a multi-burrow test warren in a single process.
@@ -141,6 +161,19 @@ file = "content/guide.txt"
 
 [[content.topics]]
 path = "/q/chat"
+
+[gui]
+enabled = true
+renderer = "webview"      # "webview" (stable) or "blitz" (experimental)
+window_width = 1024
+window_height = 768
+font_size = 16
+theme = "dark"            # "dark" | "light" | "system"
+
+[gui.ai_renderer]
+enabled = true
+model = "gpt-5-mini"
+cache_views = true
 ```
 
 ## Architecture
@@ -215,12 +248,15 @@ No JSON. No binary serialization. A human can read the traffic on the wire.
 | `serde` + `toml` | TOML config parsing (config only — never wire protocol) |
 | `clap` | CLI argument parsing |
 | `tracing` + `tracing-subscriber` | Structured logging |
+| `serde_json` | JSON for type `u` UI declarations (Phase I) |
+| `dioxus` | Reactive UI framework (optional, `gui` feature, Phase J) |
 
 ## Testing
 
 ```bash
-cargo test          # 247 tests
-cargo clippy        # 0 warnings
+cargo test                  # 580 tests (312 lib + 268 integration)
+cargo test --features gui   # Run with GUI tests (requires more disk space)
+cargo clippy                # 0 warnings
 cargo fmt -- --check
 ```
 
@@ -231,7 +267,8 @@ rabbit_engine/
 ├── src/
 │   ├── bin/
 │   │   ├── burrow.rs           # Headless server node
-│   │   ├── rabbit.rs           # Interactive browser
+│   │   ├── rabbit.rs           # Interactive terminal browser
+│   │   ├── rabbit_gui.rs       # Native GUI browser
 │   │   └── rabbit_warren.rs    # Warren launcher
 │   ├── burrow.rs               # Top-level assembly
 │   ├── config.rs               # TOML config
@@ -242,6 +279,8 @@ rabbit_engine/
 │   ├── content/                # Menus, text, loader
 │   ├── events/                 # Pub/sub, continuity
 │   ├── warren/                 # Peer table, discovery
+│   ├── ai/                     # LLM integration, HTTP, types (Phase I)
+│   ├── gui/                    # View generation, DOM, rendering (Phase J)
 │   └── lib.rs
 └── tests/                      # Integration tests
 ```

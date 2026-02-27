@@ -35,6 +35,12 @@ pub fn load_content(config: &Config, base_dir: &Path) -> Result<ContentStore, Pr
         store.register_binary(&bin.selector, data, &bin.mime);
     }
 
+    // Register UI declarations (type u)
+    for ui in &config.content.ui {
+        let body = resolve_ui_body(ui, base_dir)?;
+        store.register_ui(&ui.selector, body);
+    }
+
     Ok(store)
 }
 
@@ -89,6 +95,39 @@ fn resolve_binary_data(
             e
         ))
     })
+}
+
+/// Resolve the UI declaration body: inline `body`, or read from `file`
+/// relative to `base_dir`.  Validates that the content is valid JSON.
+fn resolve_ui_body(
+    ui: &crate::config::UiConfig,
+    base_dir: &Path,
+) -> Result<String, ProtocolError> {
+    let raw = if let Some(body) = &ui.body {
+        body.clone()
+    } else if let Some(file) = &ui.file {
+        let path = base_dir.join(file);
+        std::fs::read_to_string(&path).map_err(|e| {
+            ProtocolError::InternalError(format!(
+                "failed to read UI file '{}': {}",
+                path.display(),
+                e
+            ))
+        })?
+    } else {
+        return Err(ProtocolError::InternalError(format!(
+            "UI entry '{}' has neither body nor file",
+            ui.selector
+        )));
+    };
+    // Validate JSON
+    serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| {
+        ProtocolError::InternalError(format!(
+            "UI entry '{}' has invalid JSON: {}",
+            ui.selector, e
+        ))
+    })?;
+    Ok(raw)
 }
 
 #[cfg(test)]
