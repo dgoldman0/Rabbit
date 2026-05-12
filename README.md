@@ -5,6 +5,8 @@ federated networks of nodes called *burrows*. Inspired by Gopher's
 human-readable simplicity, layered with modern security (Ed25519 + TLS 1.3),
 async multiplexing, and native publish/subscribe with replay.
 
+This project is purely draft/scrap stage. To discuss status and potential options for development, feel free to drop by the [Barayin-Adamah community Discord server](https://discord.gg/AnrXxhs3b2). 
+
 Four binaries, one crate:
 
 | Binary | Role |
